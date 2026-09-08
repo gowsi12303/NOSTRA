@@ -121,6 +121,13 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 
+# Media files (user-uploaded content, e.g. product images)
+# https://docs.djangoproject.com/en/6.1/topics/files/
+
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+
 # Django REST Framework
 # https://www.django-rest-framework.org/api-guide/settings/
 

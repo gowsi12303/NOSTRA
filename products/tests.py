@@ -1,8 +1,23 @@
+import shutil
+import tempfile
+
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Category, Product
+from .models import Category, Product, ProductImage
+
+# A minimal valid 1x1 GIF, used to satisfy ImageField's Pillow validation
+# without needing a real image file on disk.
+TINY_GIF = (
+    b'GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9'
+    b'\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02'
+    b'\x02\x44\x01\x00\x3b'
+)
+
+TEST_MEDIA_ROOT = tempfile.mkdtemp()
 
 
 class CategoryModelTests(APITestCase):
@@ -170,3 +185,66 @@ class CategoryDetailAPITests(APITestCase):
         nonexistent_id = self.inactive_category.id + 1000
         response = self.client.get(self.detail_url(nonexistent_id))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class ProductImageTests(APITestCase):
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEST_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        self.category = Category.objects.create(name='Gadgets')
+        self.product = Product.objects.create(
+            name='Camera',
+            description='A camera',
+            price='199.99',
+            category=self.category,
+        )
+
+    def make_image_file(self, name='test.gif'):
+        return SimpleUploadedFile(name, TINY_GIF, content_type='image/gif')
+
+    def test_product_image_creation(self):
+        image = ProductImage.objects.create(
+            product=self.product,
+            image=self.make_image_file(),
+            alt_text='A camera photo',
+        )
+        self.assertTrue(image.image.name)
+        self.assertEqual(image.alt_text, 'A camera photo')
+        self.assertFalse(image.is_primary)
+
+    def test_product_image_belongs_to_correct_product(self):
+        image = ProductImage.objects.create(
+            product=self.product,
+            image=self.make_image_file(),
+        )
+        self.assertEqual(image.product, self.product)
+        self.assertIn(image, self.product.images.all())
+
+    def test_deleting_product_deletes_its_images(self):
+        image = ProductImage.objects.create(
+            product=self.product,
+            image=self.make_image_file(),
+        )
+        image_id = image.id
+        self.product.delete()
+        self.assertFalse(ProductImage.objects.filter(id=image_id).exists())
+
+    def test_product_api_includes_images_field(self):
+        ProductImage.objects.create(
+            product=self.product,
+            image=self.make_image_file(),
+            alt_text='A camera photo',
+        )
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('images', response.data)
+        self.assertEqual(len(response.data['images']), 1)
+        self.assertEqual(response.data['images'][0]['alt_text'], 'A camera photo')
+
+    def test_product_with_no_images_returns_empty_list(self):
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('images', response.data)
+        self.assertEqual(response.data['images'], [])
