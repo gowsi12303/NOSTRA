@@ -7,7 +7,7 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Category, Product, ProductImage
+from .models import Category, Product, ProductImage, ProductSize
 
 # A minimal valid 1x1 GIF, used to satisfy ImageField's Pillow validation
 # without needing a real image file on disk.
@@ -248,3 +248,75 @@ class ProductImageTests(APITestCase):
         response = self.client.get(f'/api/products/{self.product.id}/')
         self.assertIn('images', response.data)
         self.assertEqual(response.data['images'], [])
+
+
+class ProductSizeTests(APITestCase):
+    def setUp(self):
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.other_product = Product.objects.create(
+            name='Hoodie',
+            description='A hoodie',
+            price='55.00',
+            category=self.category,
+        )
+
+    def test_size_variant_creation(self):
+        size = ProductSize.objects.create(
+            product=self.product,
+            size='M',
+            stock_quantity=10,
+        )
+        self.assertEqual(size.size, 'M')
+        self.assertEqual(size.stock_quantity, 10)
+        self.assertTrue(size.is_active)
+
+    def test_product_size_belongs_to_correct_product(self):
+        size = ProductSize.objects.create(product=self.product, size='L')
+        self.assertEqual(size.product, self.product)
+        self.assertIn(size, self.product.sizes.all())
+
+    def test_duplicate_size_for_same_product_is_rejected(self):
+        ProductSize.objects.create(product=self.product, size='M')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductSize.objects.create(product=self.product, size='M')
+
+    def test_same_size_can_exist_for_different_products(self):
+        ProductSize.objects.create(product=self.product, size='M')
+        other_size = ProductSize.objects.create(product=self.other_product, size='M')
+        self.assertEqual(other_size.size, 'M')
+        self.assertEqual(other_size.product, self.other_product)
+
+    def test_negative_stock_quantity_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductSize.objects.create(
+                    product=self.product,
+                    size='S',
+                    stock_quantity=-1,
+                )
+
+    def test_product_api_includes_sizes(self):
+        ProductSize.objects.create(product=self.product, size='M', stock_quantity=5)
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('sizes', response.data)
+        self.assertEqual(len(response.data['sizes']), 1)
+        self.assertEqual(response.data['sizes'][0]['size'], 'M')
+        self.assertEqual(response.data['sizes'][0]['stock_quantity'], 5)
+
+    def test_product_with_no_sizes_returns_empty_sizes_list(self):
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('sizes', response.data)
+        self.assertEqual(response.data['sizes'], [])
+
+    def test_deleting_product_deletes_its_size_variants(self):
+        size = ProductSize.objects.create(product=self.product, size='M')
+        size_id = size.id
+        self.product.delete()
+        self.assertFalse(ProductSize.objects.filter(id=size_id).exists())
