@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 
@@ -103,3 +104,64 @@ class ProductColor(models.Model):
 
     def __str__(self):
         return f'{self.product.name} - {self.color_name}'
+
+
+class ProductVariant(models.Model):
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='variants',
+    )
+    size = models.ForeignKey(
+        ProductSize,
+        on_delete=models.CASCADE,
+        related_name='variants',
+        null=True,
+        blank=True,
+    )
+    color = models.ForeignKey(
+        ProductColor,
+        on_delete=models.CASCADE,
+        related_name='variants',
+        null=True,
+        blank=True,
+    )
+    sku = models.CharField(max_length=64, unique=True, blank=True, null=True)
+    stock_quantity = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product', 'size', 'color'],
+                condition=models.Q(size__isnull=False, color__isnull=False),
+                name='unique_variant_size_and_color',
+            ),
+            models.UniqueConstraint(
+                fields=['product', 'size'],
+                condition=models.Q(color__isnull=True),
+                name='unique_variant_size_only',
+            ),
+            models.UniqueConstraint(
+                fields=['product', 'color'],
+                condition=models.Q(size__isnull=True),
+                name='unique_variant_color_only',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(size__isnull=False) | models.Q(color__isnull=False),
+                name='variant_requires_size_or_color',
+            ),
+        ]
+
+    def clean(self):
+        if self.size_id and self.size.product_id != self.product_id:
+            raise ValidationError('Size must belong to the same product as the variant.')
+        if self.color_id and self.color.product_id != self.product_id:
+            raise ValidationError('Color must belong to the same product as the variant.')
+
+    def __str__(self):
+        size_label = self.size.size if self.size else '-'
+        color_label = self.color.color_name if self.color else '-'
+        return f'{self.product.name} - {size_label}/{color_label}'
