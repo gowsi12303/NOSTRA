@@ -83,17 +83,17 @@ class ProductListAPITests(APITestCase):
 
     def test_active_products_are_returned(self):
         response = self.client.get(self.url)
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertIn(self.active_product.name, names)
 
     def test_inactive_products_are_not_returned(self):
         response = self.client.get(self.url)
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertNotIn(self.inactive_product.name, names)
 
     def test_response_includes_category_information(self):
         response = self.client.get(self.url)
-        product_data = response.data[0]
+        product_data = response.data['results'][0]
         self.assertIn('category', product_data)
         self.assertEqual(product_data['category']['id'], self.category.id)
         self.assertEqual(product_data['category']['name'], self.category.name)
@@ -137,28 +137,28 @@ class ProductListFilterAPITests(APITestCase):
 
     def test_filter_by_category_returns_only_that_category(self):
         response = self.client.get(self.url, {'category': self.category_electronics.id})
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertIn('Laptop', names)
         self.assertIn('Phone', names)
         self.assertNotIn('T-Shirt', names)
 
     def test_filter_by_min_price_excludes_cheaper_products(self):
         response = self.client.get(self.url, {'min_price': '400'})
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertIn('Laptop', names)
         self.assertIn('Phone', names)
         self.assertNotIn('T-Shirt', names)
 
     def test_filter_by_max_price_excludes_pricier_products(self):
         response = self.client.get(self.url, {'max_price': '50'})
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertIn('T-Shirt', names)
         self.assertNotIn('Laptop', names)
         self.assertNotIn('Phone', names)
 
     def test_search_by_product_name(self):
         response = self.client.get(self.url, {'search': 'Lap'})
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertIn('Laptop', names)
         self.assertNotIn('Phone', names)
         self.assertNotIn('T-Shirt', names)
@@ -167,12 +167,12 @@ class ProductListFilterAPITests(APITestCase):
 
     def test_ordering_by_price_ascending(self):
         response = self.client.get(self.url, {'ordering': 'price'})
-        prices = [float(item['price']) for item in response.data]
+        prices = [float(item['price']) for item in response.data['results']]
         self.assertEqual(prices, sorted(prices))
 
     def test_ordering_by_price_descending(self):
         response = self.client.get(self.url, {'ordering': '-price'})
-        prices = [float(item['price']) for item in response.data]
+        prices = [float(item['price']) for item in response.data['results']]
         self.assertEqual(prices, sorted(prices, reverse=True))
 
     def test_combining_multiple_filters(self):
@@ -182,8 +182,63 @@ class ProductListFilterAPITests(APITestCase):
             'max_price': '600',
             'ordering': 'price',
         })
-        names = [item['name'] for item in response.data]
+        names = [item['name'] for item in response.data['results']]
         self.assertEqual(names, ['Phone'])
+
+
+class ProductListPaginationAPITests(APITestCase):
+    url = '/api/products/'
+
+    def setUp(self):
+        self.category = Category.objects.create(name='Bulk Category')
+        self.products = [
+            Product.objects.create(
+                name=f'Product {i:02d}',
+                description='A bulk product',
+                price='10.00',
+                category=self.category,
+                is_active=True,
+            )
+            for i in range(1, 51)
+        ]
+
+    def test_response_contains_pagination_keys(self):
+        response = self.client.get(self.url)
+        self.assertIn('count', response.data)
+        self.assertIn('next', response.data)
+        self.assertIn('previous', response.data)
+        self.assertIn('results', response.data)
+
+    def test_default_page_size_is_12(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.data['count'], 50)
+        self.assertEqual(len(response.data['results']), 12)
+
+    def test_page_2_returns_next_page(self):
+        page_1 = self.client.get(self.url)
+        page_2 = self.client.get(self.url, {'page': 2})
+        page_1_names = [item['name'] for item in page_1.data['results']]
+        page_2_names = [item['name'] for item in page_2.data['results']]
+        self.assertEqual(len(page_2.data['results']), 12)
+        self.assertTrue(set(page_1_names).isdisjoint(page_2_names))
+
+    def test_custom_page_size_query_param(self):
+        response = self.client.get(self.url, {'page_size': 5})
+        self.assertEqual(len(response.data['results']), 5)
+
+    def test_page_size_is_capped_at_max_page_size(self):
+        response = self.client.get(self.url, {'page_size': 9999})
+        self.assertEqual(len(response.data['results']), 48)
+
+    def test_first_page_has_no_previous(self):
+        response = self.client.get(self.url)
+        self.assertIsNone(response.data['previous'])
+
+    def test_last_page_has_no_next(self):
+        # 50 items at page_size 12 -> 5 pages (12, 12, 12, 12, 2)
+        response = self.client.get(self.url, {'page': 5})
+        self.assertIsNone(response.data['next'])
+        self.assertEqual(len(response.data['results']), 2)
 
 
 class ProductDetailAPITests(APITestCase):
