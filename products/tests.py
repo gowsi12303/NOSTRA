@@ -8,7 +8,14 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Category, Product, ProductColor, ProductImage, ProductSize
+from .models import (
+    Category,
+    Product,
+    ProductColor,
+    ProductImage,
+    ProductSize,
+    ProductVariant,
+)
 
 # A minimal valid 1x1 GIF, used to satisfy ImageField's Pillow validation
 # without needing a real image file on disk.
@@ -401,3 +408,137 @@ class ProductColorTests(APITestCase):
         color_id = color.id
         self.product.delete()
         self.assertFalse(ProductColor.objects.filter(id=color_id).exists())
+
+
+class ProductVariantTests(APITestCase):
+    def setUp(self):
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.other_product = Product.objects.create(
+            name='Hoodie',
+            description='A hoodie',
+            price='55.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+
+    def test_variant_creation_with_size_and_color(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            stock_quantity=5,
+        )
+        self.assertEqual(variant.size, self.size)
+        self.assertEqual(variant.color, self.color)
+        self.assertEqual(variant.stock_quantity, 5)
+        self.assertTrue(variant.is_active)
+
+    def test_size_only_variant_creation(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            stock_quantity=10,
+        )
+        self.assertEqual(variant.size, self.size)
+        self.assertIsNone(variant.color)
+
+    def test_color_only_variant_creation(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            color=self.color,
+            stock_quantity=8,
+        )
+        self.assertIsNone(variant.size)
+        self.assertEqual(variant.color, self.color)
+
+    def test_variant_without_size_and_color_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductVariant.objects.create(product=self.product)
+
+    def test_variant_belongs_to_correct_product(self):
+        variant = ProductVariant.objects.create(product=self.product, size=self.size)
+        self.assertEqual(variant.product, self.product)
+        self.assertIn(variant, self.product.variants.all())
+
+    def test_size_from_different_product_is_rejected(self):
+        variant = ProductVariant(product=self.other_product, size=self.size)
+        with self.assertRaises(ValidationError):
+            variant.full_clean()
+
+    def test_color_from_different_product_is_rejected(self):
+        variant = ProductVariant(product=self.other_product, color=self.color)
+        with self.assertRaises(ValidationError):
+            variant.full_clean()
+
+    def test_duplicate_size_and_color_is_rejected(self):
+        ProductVariant.objects.create(product=self.product, size=self.size, color=self.color)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductVariant.objects.create(product=self.product, size=self.size, color=self.color)
+
+    def test_duplicate_size_only_is_rejected(self):
+        ProductVariant.objects.create(product=self.product, size=self.size)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductVariant.objects.create(product=self.product, size=self.size)
+
+    def test_duplicate_color_only_is_rejected(self):
+        ProductVariant.objects.create(product=self.product, color=self.color)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductVariant.objects.create(product=self.product, color=self.color)
+
+    def test_same_size_color_combination_allowed_for_different_products(self):
+        ProductVariant.objects.create(product=self.product, size=self.size, color=self.color)
+
+        other_size = ProductSize.objects.create(product=self.other_product, size='M')
+        other_color = ProductColor.objects.create(product=self.other_product, color_name='Red')
+        other_variant = ProductVariant.objects.create(
+            product=self.other_product,
+            size=other_size,
+            color=other_color,
+        )
+        self.assertEqual(other_variant.product, self.other_product)
+
+    def test_negative_stock_quantity_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductVariant.objects.create(
+                    product=self.product,
+                    size=self.size,
+                    stock_quantity=-1,
+                )
+
+    def test_deleting_product_deletes_its_variants(self):
+        variant = ProductVariant.objects.create(product=self.product, size=self.size)
+        variant_id = variant.id
+        self.product.delete()
+        self.assertFalse(ProductVariant.objects.filter(id=variant_id).exists())
+
+    def test_deleting_size_deletes_dependent_variants(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+        )
+        variant_id = variant.id
+        self.size.delete()
+        self.assertFalse(ProductVariant.objects.filter(id=variant_id).exists())
+
+    def test_deleting_color_deletes_dependent_variants(self):
+        variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+        )
+        variant_id = variant.id
+        self.color.delete()
+        self.assertFalse(ProductVariant.objects.filter(id=variant_id).exists())
