@@ -542,3 +542,26 @@ class ProductVariantTests(APITestCase):
         variant_id = variant.id
         self.color.delete()
         self.assertFalse(ProductVariant.objects.filter(id=variant_id).exists())
+
+    def test_product_api_includes_variants(self):
+        ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            sku='TSHIRT-RED-M',
+            stock_quantity=5,
+        )
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('variants', response.data)
+        self.assertEqual(len(response.data['variants']), 1)
+        variant_data = response.data['variants'][0]
+        self.assertEqual(variant_data['size']['size'], 'M')
+        self.assertEqual(variant_data['color']['color_name'], 'Red')
+        self.assertEqual(variant_data['sku'], 'TSHIRT-RED-M')
+        self.assertEqual(variant_data['stock_quantity'], 5)
+        self.assertTrue(variant_data['is_active'])
+
+    def test_product_with_no_variants_returns_empty_list(self):
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('variants', response.data)
+        self.assertEqual(response.data['variants'], [])
