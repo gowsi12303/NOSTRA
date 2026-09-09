@@ -3,16 +3,20 @@ import tempfile
 
 from django.conf import settings
 from django.conf.urls.static import static
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
 from django.test import RequestFactory, override_settings
 from django.test.utils import CaptureQueriesContext
+from django.urls import resolve
 from django.views.static import serve as static_serve
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
 
 from .models import (
+    Cart,
+    CartItem,
     Category,
     Product,
     ProductColor,
@@ -20,6 +24,16 @@ from .models import (
     ProductSize,
     ProductVariant,
 )
+from .serializers import CartItemSerializer, CartSerializer
+from .views import (
+    CartAddItemView,
+    CartDetailView,
+    CartItemDetailView,
+    CategoryListView,
+    ProductListView,
+)
+
+User = get_user_model()
 
 # A minimal valid 1x1 GIF, used to satisfy ImageField's Pillow validation
 # without needing a real image file on disk.
@@ -827,3 +841,424 @@ class ProductVariantTests(APITestCase):
         response = self.client.get(f'/api/products/{self.product.id}/')
         self.assertIn('variants', response.data)
         self.assertEqual(response.data['variants'], [])
+
+
+class CartTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='cartuser',
+            email='cartuser@nostra.com',
+            password='CartPass@2026!',
+        )
+
+    def test_cart_creation_and_user_relationship(self):
+        cart = Cart.objects.create(user=self.user)
+        self.assertEqual(cart.user, self.user)
+        self.assertEqual(self.user.cart, cart)
+        self.assertIsNotNone(cart.created_at)
+        self.assertIsNotNone(cart.updated_at)
+
+    def test_user_cannot_have_more_than_one_cart(self):
+        Cart.objects.create(user=self.user)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Cart.objects.create(user=self.user)
+
+    def test_deleting_user_deletes_cart(self):
+        cart = Cart.objects.create(user=self.user)
+        cart_id = cart.id
+        self.user.delete()
+        self.assertFalse(Cart.objects.filter(id=cart_id).exists())
+
+
+class CartItemTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='cartuser',
+            email='cartuser@nostra.com',
+            password='CartPass@2026!',
+        )
+        self.cart = Cart.objects.create(user=self.user)
+
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            stock_quantity=10,
+        )
+
+    def test_cart_item_creation_and_relationships(self):
+        item = CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=2)
+        self.assertEqual(item.cart, self.cart)
+        self.assertEqual(item.variant, self.variant)
+        self.assertEqual(item.quantity, 2)
+        self.assertIn(item, self.cart.items.all())
+        self.assertIn(item, self.variant.cart_items.all())
+
+    def test_quantity_defaults_to_one(self):
+        item = CartItem.objects.create(cart=self.cart, variant=self.variant)
+        self.assertEqual(item.quantity, 1)
+
+    def test_zero_quantity_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=0)
+
+    def test_negative_quantity_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=-1)
+
+    def test_duplicate_cart_item_for_same_variant_is_rejected(self):
+        CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=1)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=1)
+
+    def test_same_variant_can_exist_in_different_carts(self):
+        CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=1)
+
+        other_user = User.objects.create_user(
+            username='othercart',
+            email='othercart@nostra.com',
+            password='CartPass@2026!',
+        )
+        other_cart = Cart.objects.create(user=other_user)
+        other_item = CartItem.objects.create(cart=other_cart, variant=self.variant, quantity=3)
+        self.assertEqual(other_item.variant, self.variant)
+
+    def test_deleting_cart_deletes_its_items(self):
+        item = CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=1)
+        item_id = item.id
+        self.cart.delete()
+        self.assertFalse(CartItem.objects.filter(id=item_id).exists())
+
+    def test_deleting_variant_deletes_dependent_cart_items(self):
+        item = CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=1)
+        item_id = item.id
+        self.variant.delete()
+        self.assertFalse(CartItem.objects.filter(id=item_id).exists())
+
+
+class CartSerializerTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='cartserializeruser',
+            email='cartserializer@nostra.com',
+            password='CartPass@2026!',
+        )
+        self.cart = Cart.objects.create(user=self.user)
+
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            sku='TSHIRT-RED-M',
+            stock_quantity=10,
+        )
+        self.item = CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=2)
+
+    def test_cart_serialization_includes_expected_fields(self):
+        data = CartSerializer(self.cart).data
+        self.assertEqual(set(data.keys()), {'id', 'items', 'created_at', 'updated_at'})
+        self.assertEqual(data['id'], self.cart.id)
+        self.assertEqual(len(data['items']), 1)
+
+    def test_cart_with_no_items_serializes_empty_items_list(self):
+        other_user = User.objects.create_user(
+            username='emptycartuser',
+            email='emptycart@nostra.com',
+            password='CartPass@2026!',
+        )
+        empty_cart = Cart.objects.create(user=other_user)
+        data = CartSerializer(empty_cart).data
+        self.assertEqual(data['items'], [])
+
+    def test_cart_serializer_does_not_expose_user_field(self):
+        data = CartSerializer(self.cart).data
+        self.assertNotIn('user', data)
+
+    def test_cart_serializer_user_is_not_writable(self):
+        serializer = CartSerializer(data={
+            'user': self.user.id,
+            'items': [],
+        })
+        self.assertNotIn('user', serializer.fields)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('user', serializer.validated_data)
+
+    def test_cart_item_serialization_includes_expected_fields(self):
+        data = CartItemSerializer(self.item).data
+        self.assertEqual(set(data.keys()), {'id', 'variant', 'quantity', 'created_at', 'updated_at'})
+        self.assertEqual(data['id'], self.item.id)
+        self.assertEqual(data['quantity'], 2)
+
+    def test_cart_item_serialization_includes_nested_variant_product_size_color(self):
+        data = CartItemSerializer(self.item).data
+        variant_data = data['variant']
+
+        self.assertEqual(variant_data['id'], self.variant.id)
+        self.assertEqual(variant_data['sku'], 'TSHIRT-RED-M')
+        self.assertEqual(variant_data['stock_quantity'], 10)
+        self.assertTrue(variant_data['is_active'])
+
+        self.assertEqual(variant_data['product']['id'], self.product.id)
+        self.assertEqual(variant_data['product']['name'], 'T-Shirt')
+        self.assertEqual(variant_data['product']['price'], '25.00')
+
+        self.assertEqual(variant_data['size']['size'], 'M')
+        self.assertEqual(variant_data['color']['color_name'], 'Red')
+
+
+class CartDetailViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='cartviewuser',
+            email='cartview@nostra.com',
+            password='CartPass@2026!',
+        )
+
+    def test_unauthenticated_access_is_rejected(self):
+        request = self.factory.get('/api/cart/')
+        response = CartDetailView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_authenticated_user_gets_their_own_cart(self):
+        cart = Cart.objects.create(user=self.user)
+        request = self.factory.get('/api/cart/')
+        force_authenticate(request, user=self.user)
+        response = CartDetailView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], cart.id)
+
+    def test_cart_is_auto_created_when_missing(self):
+        self.assertFalse(Cart.objects.filter(user=self.user).exists())
+        request = self.factory.get('/api/cart/')
+        force_authenticate(request, user=self.user)
+        response = CartDetailView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(Cart.objects.filter(user=self.user).exists())
+
+
+class CartAddItemViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='additemuser',
+            email='additem@nostra.com',
+            password='CartPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            stock_quantity=10,
+        )
+
+    def post_add_item(self, data, user=None):
+        request = self.factory.post('/api/cart/items/', data, format='json')
+        force_authenticate(request, user=user or self.user)
+        return CartAddItemView.as_view()(request)
+
+    def test_unauthenticated_access_is_rejected(self):
+        request = self.factory.post(
+            '/api/cart/items/',
+            {'variant_id': self.variant.id, 'quantity': 1},
+            format='json',
+        )
+        response = CartAddItemView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_add_item_successfully(self):
+        response = self.post_add_item({'variant_id': self.variant.id, 'quantity': 2})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['quantity'], 2)
+        item = CartItem.objects.get(cart__user=self.user, variant=self.variant)
+        self.assertEqual(item.quantity, 2)
+
+    def test_add_item_with_invalid_quantity_is_rejected(self):
+        response = self.post_add_item({'variant_id': self.variant.id, 'quantity': 0})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CartItem.objects.filter(variant=self.variant).exists())
+
+    def test_inactive_variant_is_rejected(self):
+        self.variant.is_active = False
+        self.variant.save(update_fields=['is_active'])
+        response = self.post_add_item({'variant_id': self.variant.id, 'quantity': 1})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CartItem.objects.filter(variant=self.variant).exists())
+
+    def test_inactive_product_is_rejected(self):
+        self.product.is_active = False
+        self.product.save(update_fields=['is_active'])
+        response = self.post_add_item({'variant_id': self.variant.id, 'quantity': 1})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CartItem.objects.filter(variant=self.variant).exists())
+
+    def test_quantity_cannot_exceed_stock(self):
+        response = self.post_add_item({'variant_id': self.variant.id, 'quantity': 11})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CartItem.objects.filter(variant=self.variant).exists())
+
+    def test_adding_same_variant_updates_existing_item_instead_of_duplicating(self):
+        first = self.post_add_item({'variant_id': self.variant.id, 'quantity': 3})
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.post_add_item({'variant_id': self.variant.id, 'quantity': 2})
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data['quantity'], 5)
+
+        self.assertEqual(
+            CartItem.objects.filter(cart__user=self.user, variant=self.variant).count(), 1,
+        )
+        item = CartItem.objects.get(cart__user=self.user, variant=self.variant)
+        self.assertEqual(item.quantity, 5)
+
+    def test_adding_same_variant_beyond_stock_is_rejected(self):
+        self.post_add_item({'variant_id': self.variant.id, 'quantity': 8})
+        response = self.post_add_item({'variant_id': self.variant.id, 'quantity': 5})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        item = CartItem.objects.get(cart__user=self.user, variant=self.variant)
+        self.assertEqual(item.quantity, 8)
+
+
+class CartItemDetailViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='itemdetailuser',
+            email='itemdetail@nostra.com',
+            password='CartPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherdetailuser',
+            email='otherdetail@nostra.com',
+            password='CartPass@2026!',
+        )
+        self.cart = Cart.objects.create(user=self.user)
+        Cart.objects.create(user=self.other_user)
+
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            stock_quantity=10,
+        )
+        self.item = CartItem.objects.create(cart=self.cart, variant=self.variant, quantity=2)
+
+    def patch_item(self, item_id, data, user):
+        request = self.factory.patch(f'/api/cart/items/{item_id}/', data, format='json')
+        force_authenticate(request, user=user)
+        return CartItemDetailView.as_view()(request, pk=item_id)
+
+    def delete_item(self, item_id, user):
+        request = self.factory.delete(f'/api/cart/items/{item_id}/')
+        force_authenticate(request, user=user)
+        return CartItemDetailView.as_view()(request, pk=item_id)
+
+    def test_unauthenticated_cannot_update_cart_item(self):
+        request = self.factory.patch(
+            f'/api/cart/items/{self.item.id}/', {'quantity': 3}, format='json',
+        )
+        response = CartItemDetailView.as_view()(request, pk=self.item.id)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_update_cart_item_quantity(self):
+        response = self.patch_item(self.item.id, {'quantity': 5}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['quantity'], 5)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 5)
+
+    def test_update_quantity_beyond_stock_is_rejected(self):
+        response = self.patch_item(self.item.id, {'quantity': 11}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 2)
+
+    def test_update_quantity_below_one_is_rejected(self):
+        response = self.patch_item(self.item.id, {'quantity': 0}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 2)
+
+    def test_remove_cart_item(self):
+        response = self.delete_item(self.item.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(CartItem.objects.filter(id=self.item.id).exists())
+
+    def test_user_cannot_access_another_users_cart_item(self):
+        patch_response = self.patch_item(self.item.id, {'quantity': 3}, user=self.other_user)
+        self.assertEqual(patch_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.quantity, 2)
+
+        delete_response = self.delete_item(self.item.id, user=self.other_user)
+        self.assertEqual(delete_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(CartItem.objects.filter(id=self.item.id).exists())
+
+
+class CartURLRoutingTests(APITestCase):
+    def test_cart_detail_url_resolves_to_cart_detail_view(self):
+        match = resolve('/api/products/cart/')
+        self.assertEqual(match.func.cls, CartDetailView)
+
+    def test_cart_add_item_url_resolves_to_cart_add_item_view(self):
+        match = resolve('/api/products/cart/items/')
+        self.assertEqual(match.func.cls, CartAddItemView)
+
+    def test_cart_item_detail_url_resolves_to_cart_item_detail_view(self):
+        match = resolve('/api/products/cart/items/5/')
+        self.assertEqual(match.func.cls, CartItemDetailView)
+        self.assertEqual(match.kwargs, {'pk': 5})
+
+    def test_cart_detail_endpoint_is_reachable(self):
+        response = self.client.get('/api/products/cart/')
+        self.assertNotEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cart_add_item_endpoint_is_reachable(self):
+        response = self.client.post('/api/products/cart/items/', {}, format='json')
+        self.assertNotEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cart_item_detail_endpoint_is_reachable(self):
+        response = self.client.patch('/api/products/cart/items/1/', {}, format='json')
+        self.assertNotEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_existing_product_and_category_urls_are_unaffected(self):
+        self.assertEqual(resolve('/api/products/').func.cls, ProductListView)
+        self.assertEqual(resolve('/api/products/categories/').func.cls, CategoryListView)

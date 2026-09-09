@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
@@ -165,3 +166,47 @@ class ProductVariant(models.Model):
         size_label = self.size.size if self.size else '-'
         color_label = self.color.color_name if self.color else '-'
         return f'{self.product.name} - {size_label}/{color_label}'
+
+
+class Cart(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='cart',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Cart for {self.user}'
+
+
+class CartItem(models.Model):
+    cart = models.ForeignKey(
+        Cart,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    variant = models.ForeignKey(
+        ProductVariant,
+        on_delete=models.CASCADE,
+        related_name='cart_items',
+    )
+    quantity = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['cart', 'variant'],
+                name='unique_cart_variant',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(quantity__gte=1),
+                name='cartitem_quantity_at_least_one',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.quantity} x {self.variant} (cart #{self.cart_id})'

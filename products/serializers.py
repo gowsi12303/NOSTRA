@@ -1,6 +1,8 @@
 from rest_framework import serializers
 
 from .models import (
+    Cart,
+    CartItem,
     Category,
     Product,
     ProductColor,
@@ -99,6 +101,70 @@ class ProductSerializer(serializers.ModelSerializer):
             'colors',
             'variants',
             'is_active',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class ProductSummarySerializer(serializers.ModelSerializer):
+    """Minimal, read-only product information needed to display a cart line item."""
+
+    class Meta:
+        model = Product
+        fields = [
+            'id',
+            'name',
+            'price',
+        ]
+
+
+class CartItemVariantSerializer(serializers.ModelSerializer):
+    """Read-only ProductVariant representation tailored for the cart, including
+    the parent product context that's implicit when a variant is nested inside
+    ProductSerializer.variants but isn't otherwise available on its own."""
+
+    product = ProductSummarySerializer(read_only=True)
+    size = ProductSizeSerializer(read_only=True)
+    color = ProductColorSerializer(read_only=True)
+
+    class Meta:
+        model = ProductVariant
+        fields = [
+            'id',
+            'product',
+            'size',
+            'color',
+            'sku',
+            'stock_quantity',
+            'is_active',
+        ]
+
+
+class CartItemSerializer(serializers.ModelSerializer):
+    variant = CartItemVariantSerializer(read_only=True)
+
+    class Meta:
+        model = CartItem
+        fields = [
+            'id',
+            'variant',
+            'quantity',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class CartSerializer(serializers.ModelSerializer):
+    # 'user' is intentionally not a field here: the cart is always tied to the
+    # authenticated request's user by the view (not implemented yet), never
+    # accepted from client input.
+    items = CartItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Cart
+        fields = [
+            'id',
+            'items',
             'created_at',
             'updated_at',
         ]
