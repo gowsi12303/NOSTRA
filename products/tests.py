@@ -99,6 +99,93 @@ class ProductListAPITests(APITestCase):
         self.assertEqual(product_data['category']['name'], self.category.name)
 
 
+class ProductListFilterAPITests(APITestCase):
+    url = '/api/products/'
+
+    def setUp(self):
+        self.category_electronics = Category.objects.create(name='Electronics')
+        self.category_apparel = Category.objects.create(name='Apparel')
+
+        self.laptop = Product.objects.create(
+            name='Laptop',
+            description='A laptop',
+            price='999.99',
+            category=self.category_electronics,
+            is_active=True,
+        )
+        self.phone = Product.objects.create(
+            name='Phone',
+            description='A phone',
+            price='499.99',
+            category=self.category_electronics,
+            is_active=True,
+        )
+        self.shirt = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='19.99',
+            category=self.category_apparel,
+            is_active=True,
+        )
+        self.inactive_laptop = Product.objects.create(
+            name='Old Laptop',
+            description='A discontinued laptop',
+            price='199.99',
+            category=self.category_electronics,
+            is_active=False,
+        )
+
+    def test_filter_by_category_returns_only_that_category(self):
+        response = self.client.get(self.url, {'category': self.category_electronics.id})
+        names = [item['name'] for item in response.data]
+        self.assertIn('Laptop', names)
+        self.assertIn('Phone', names)
+        self.assertNotIn('T-Shirt', names)
+
+    def test_filter_by_min_price_excludes_cheaper_products(self):
+        response = self.client.get(self.url, {'min_price': '400'})
+        names = [item['name'] for item in response.data]
+        self.assertIn('Laptop', names)
+        self.assertIn('Phone', names)
+        self.assertNotIn('T-Shirt', names)
+
+    def test_filter_by_max_price_excludes_pricier_products(self):
+        response = self.client.get(self.url, {'max_price': '50'})
+        names = [item['name'] for item in response.data]
+        self.assertIn('T-Shirt', names)
+        self.assertNotIn('Laptop', names)
+        self.assertNotIn('Phone', names)
+
+    def test_search_by_product_name(self):
+        response = self.client.get(self.url, {'search': 'Lap'})
+        names = [item['name'] for item in response.data]
+        self.assertIn('Laptop', names)
+        self.assertNotIn('Phone', names)
+        self.assertNotIn('T-Shirt', names)
+        # inactive products must stay excluded even if the name matches
+        self.assertNotIn('Old Laptop', names)
+
+    def test_ordering_by_price_ascending(self):
+        response = self.client.get(self.url, {'ordering': 'price'})
+        prices = [float(item['price']) for item in response.data]
+        self.assertEqual(prices, sorted(prices))
+
+    def test_ordering_by_price_descending(self):
+        response = self.client.get(self.url, {'ordering': '-price'})
+        prices = [float(item['price']) for item in response.data]
+        self.assertEqual(prices, sorted(prices, reverse=True))
+
+    def test_combining_multiple_filters(self):
+        response = self.client.get(self.url, {
+            'category': self.category_electronics.id,
+            'min_price': '400',
+            'max_price': '600',
+            'ordering': 'price',
+        })
+        names = [item['name'] for item in response.data]
+        self.assertEqual(names, ['Phone'])
+
+
 class ProductDetailAPITests(APITestCase):
     def setUp(self):
         self.category = Category.objects.create(name='General')
