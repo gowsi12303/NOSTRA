@@ -14,6 +14,8 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
@@ -22,3 +24,9 @@ urlpatterns = [
     path('api/accounts/', include('accounts.urls')),
     path('api/products/', include('products.urls')),
 ]
+
+if settings.DEBUG:
+    # Serve uploaded media (e.g. product images) through the dev server only.
+    # In production, media should be served by the web server / storage backend,
+    # never by Django itself.
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

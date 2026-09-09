@@ -1,18 +1,30 @@
+from django.db.models import Prefetch
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny
 
 from .filters import ProductFilter
-from .models import Category, Product
+from .models import Category, Product, ProductVariant
 from .pagination import ProductPagination
 from .serializers import CategorySerializer, ProductSerializer
+
+
+def _active_products_optimized():
+    """Active products with related data fetched up front to avoid N+1 queries
+    when ProductSerializer nests category/images/sizes/colors/variants."""
+    return Product.objects.filter(is_active=True).select_related('category').prefetch_related(
+        'images',
+        'sizes',
+        'colors',
+        Prefetch('variants', queryset=ProductVariant.objects.select_related('size', 'color')),
+    )
 
 
 class ProductListView(generics.ListAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
-    queryset = Product.objects.filter(is_active=True).order_by('id')
+    queryset = _active_products_optimized().order_by('id')
     filter_backends = [
         DjangoFilterBackend,
         SearchFilter,
@@ -27,7 +39,7 @@ class ProductListView(generics.ListAPIView):
 class ProductDetailView(generics.RetrieveAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
-    queryset = Product.objects.filter(is_active=True)
+    queryset = _active_products_optimized()
 
 
 class CategoryListView(generics.ListAPIView):

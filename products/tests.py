@@ -1,10 +1,14 @@
 import shutil
 import tempfile
 
+from django.conf import settings
+from django.conf.urls.static import static
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, transaction
-from django.test import override_settings
+from django.db import IntegrityError, connection, transaction
+from django.test import RequestFactory, override_settings
+from django.test.utils import CaptureQueriesContext
+from django.views.static import serve as static_serve
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -241,6 +245,69 @@ class ProductListPaginationAPITests(APITestCase):
         self.assertEqual(len(response.data['results']), 2)
 
 
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class ProductAPIQueryOptimizationTests(APITestCase):
+    """Verifies category/images/sizes/colors/variants are fetched without N+1 queries."""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEST_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        self.category = Category.objects.create(name='Query Category')
+
+    def _create_fully_populated_product(self, name):
+        product = Product.objects.create(
+            name=name,
+            description='A product',
+            price='10.00',
+            category=self.category,
+            is_active=True,
+        )
+        ProductImage.objects.create(
+            product=product,
+            image=SimpleUploadedFile(f'{name}.gif', TINY_GIF, content_type='image/gif'),
+            alt_text='alt',
+        )
+        size = ProductSize.objects.create(product=product, size='M')
+        color = ProductColor.objects.create(product=product, color_name='Red')
+        ProductVariant.objects.create(product=product, size=size, color=color, stock_quantity=5)
+        return product
+
+    def test_list_view_returns_expected_number_of_queries(self):
+        for i in range(3):
+            self._create_fully_populated_product(f'Product {i}')
+
+        # 1 count + 1 product-select (category joined) + 4 prefetches
+        # (images, sizes, colors, variants-with-size/color-joined) = 6, no matter how
+        # many products/images/sizes/colors/variants exist.
+        with self.assertNumQueries(6):
+            response = self.client.get('/api/products/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_detail_view_returns_expected_number_of_queries(self):
+        product = self._create_fully_populated_product('Solo Product')
+
+        # Same as the list view but without the pagination count query.
+        with self.assertNumQueries(5):
+            response = self.client.get(f'/api/products/{product.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_list_view_query_count_does_not_scale_with_product_count(self):
+        for i in range(2):
+            self._create_fully_populated_product(f'Small {i}')
+        with CaptureQueriesContext(connection) as small_dataset:
+            self.client.get('/api/products/')
+
+        for i in range(6):
+            self._create_fully_populated_product(f'Large {i}')
+        with CaptureQueriesContext(connection) as large_dataset:
+            self.client.get('/api/products/')
+
+        self.assertEqual(len(small_dataset.captured_queries), len(large_dataset.captured_queries))
+
+
 class ProductDetailAPITests(APITestCase):
     def setUp(self):
         self.category = Category.objects.create(name='General')
@@ -398,6 +465,59 @@ class ProductImageTests(APITestCase):
         response = self.client.get(f'/api/products/{self.product.id}/')
         self.assertIn('images', response.data)
         self.assertEqual(response.data['images'], [])
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class MediaConfigurationTests(APITestCase):
+    """Verifies uploaded media (e.g. product images) is actually reachable
+    during local development, without changing any API response shape."""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEST_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        self.category = Category.objects.create(name='Gadgets')
+        self.product = Product.objects.create(
+            name='Camera',
+            description='A camera',
+            price='199.99',
+            category=self.category,
+        )
+
+    def test_static_helper_serves_media_when_debug_is_true(self):
+        with override_settings(DEBUG=True):
+            patterns = static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+        self.assertTrue(len(patterns) > 0)
+
+    def test_static_helper_serves_nothing_when_debug_is_false(self):
+        with override_settings(DEBUG=False):
+            patterns = static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+        self.assertEqual(patterns, [])
+
+    def test_uploaded_image_is_retrievable_from_media_root(self):
+        image = ProductImage.objects.create(
+            product=self.product,
+            image=SimpleUploadedFile('camera.gif', TINY_GIF, content_type='image/gif'),
+        )
+
+        request = RequestFactory().get(f'{settings.MEDIA_URL}{image.image.name}')
+        response = static_serve(
+            request,
+            path=image.image.name,
+            document_root=settings.MEDIA_ROOT,
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_image_field_url_uses_configured_media_url(self):
+        ProductImage.objects.create(
+            product=self.product,
+            image=SimpleUploadedFile('camera.gif', TINY_GIF, content_type='image/gif'),
+        )
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        image_url = response.data['images'][0]['image']
+        self.assertIn(settings.MEDIA_URL, image_url)
 
 
 class ProductSizeTests(APITestCase):
