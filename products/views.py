@@ -1,6 +1,9 @@
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics
+from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny
 
+from .filters import ProductFilter
 from .models import Category, Product
 from .serializers import CategorySerializer, ProductSerializer
 
@@ -9,6 +12,14 @@ class ProductListView(generics.ListAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
     queryset = Product.objects.filter(is_active=True)
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+    filterset_class = ProductFilter
+    search_fields = ['name']
+    ordering_fields = ['price']
 
 
 class ProductDetailView(generics.RetrieveAPIView):
