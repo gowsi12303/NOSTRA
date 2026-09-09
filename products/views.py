@@ -8,9 +8,15 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .filters import ProductFilter
-from .models import Cart, CartItem, Category, Product, ProductVariant
+from .models import Cart, CartItem, Category, Product, ProductVariant, WishlistItem
 from .pagination import ProductPagination
-from .serializers import CartItemSerializer, CartSerializer, CategorySerializer, ProductSerializer
+from .serializers import (
+    CartItemSerializer,
+    CartSerializer,
+    CategorySerializer,
+    ProductSerializer,
+    WishlistItemSerializer,
+)
 
 
 def _active_products_optimized():
@@ -159,3 +165,57 @@ class CartItemDetailView(generics.GenericAPIView):
         item = self.get_object()
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Wishlist -----------------------------------------------------------
+# Input-only serializer for validating wishlist write requests, kept here
+# (not in serializers.py) for the same reason as the Cart input
+# serializers above — WishlistItemSerializer is used for every response.
+
+class AddWishlistItemInputSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+
+
+class WishlistListCreateView(generics.GenericAPIView):
+    """GET: the authenticated user's wishlist items.
+    POST {product_id}: add a product to the authenticated user's wishlist."""
+    serializer_class = WishlistItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return WishlistItem.objects.filter(user=self.request.user).select_related('product')
+
+    def get(self, request, *args, **kwargs):
+        serializer = self.get_serializer(self.get_queryset(), many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, *args, **kwargs):
+        input_serializer = AddWishlistItemInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        product_id = input_serializer.validated_data['product_id']
+
+        product = get_object_or_404(Product, pk=product_id)
+        if not product.is_active:
+            return Response(
+                {'detail': 'This product is not available.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if WishlistItem.objects.filter(user=request.user, product=product).exists():
+            return Response(
+                {'detail': 'This product is already in your wishlist.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        item = WishlistItem.objects.create(user=request.user, product=product)
+        return Response(self.get_serializer(item).data, status=status.HTTP_201_CREATED)
+
+
+class WishlistItemDeleteView(generics.DestroyAPIView):
+    """Remove a single WishlistItem — scoped to the authenticated user's own
+    wishlist, so another user's items are unreachable (404, not 403)."""
+    serializer_class = WishlistItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return WishlistItem.objects.filter(user=self.request.user)

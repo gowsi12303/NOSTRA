@@ -23,14 +23,17 @@ from .models import (
     ProductImage,
     ProductSize,
     ProductVariant,
+    WishlistItem,
 )
-from .serializers import CartItemSerializer, CartSerializer
+from .serializers import CartItemSerializer, CartSerializer, WishlistItemSerializer
 from .views import (
     CartAddItemView,
     CartDetailView,
     CartItemDetailView,
     CategoryListView,
     ProductListView,
+    WishlistItemDeleteView,
+    WishlistListCreateView,
 )
 
 User = get_user_model()
@@ -1262,3 +1265,172 @@ class CartURLRoutingTests(APITestCase):
     def test_existing_product_and_category_urls_are_unaffected(self):
         self.assertEqual(resolve('/api/products/').func.cls, ProductListView)
         self.assertEqual(resolve('/api/products/categories/').func.cls, CategoryListView)
+
+
+class WishlistItemSerializerTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='wishlistuser',
+            email='wishlistuser@nostra.com',
+            password='WishlistPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.item = WishlistItem.objects.create(user=self.user, product=self.product)
+
+    def test_wishlist_item_serializes_correctly(self):
+        data = WishlistItemSerializer(self.item).data
+        self.assertEqual(set(data.keys()), {'id', 'product', 'created_at', 'updated_at'})
+        self.assertEqual(data['id'], self.item.id)
+
+    def test_user_is_not_exposed_as_writable_input(self):
+        data = WishlistItemSerializer(self.item).data
+        self.assertNotIn('user', data)
+
+        serializer = WishlistItemSerializer(data={
+            'user': self.user.id,
+            'product': self.product.id,
+        })
+        self.assertNotIn('user', serializer.fields)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('user', serializer.validated_data)
+
+    def test_product_details_are_included(self):
+        data = WishlistItemSerializer(self.item).data
+        self.assertEqual(data['product']['id'], self.product.id)
+        self.assertEqual(data['product']['name'], 'T-Shirt')
+        self.assertEqual(data['product']['price'], '25.00')
+
+
+class WishlistListCreateViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='wishlistviewuser',
+            email='wishlistview@nostra.com',
+            password='WishlistPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherwishlistuser',
+            email='otherwishlist@nostra.com',
+            password='WishlistPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+
+    def get_wishlist(self, user):
+        request = self.factory.get('/api/products/wishlist/')
+        force_authenticate(request, user=user)
+        return WishlistListCreateView.as_view()(request)
+
+    def post_wishlist(self, data, user):
+        request = self.factory.post('/api/products/wishlist/', data, format='json')
+        force_authenticate(request, user=user)
+        return WishlistListCreateView.as_view()(request)
+
+    def test_unauthenticated_access_is_rejected(self):
+        request = self.factory.get('/api/products/wishlist/')
+        response = WishlistListCreateView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_unauthenticated_cannot_add_item(self):
+        request = self.factory.post(
+            '/api/products/wishlist/', {'product_id': self.product.id}, format='json',
+        )
+        response = WishlistListCreateView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_empty_wishlist_returns_empty_list(self):
+        response = self.get_wishlist(self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_add_wishlist_item(self):
+        response = self.post_wishlist({'product_id': self.product.id}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['product']['id'], self.product.id)
+        self.assertTrue(WishlistItem.objects.filter(user=self.user, product=self.product).exists())
+
+    def test_duplicate_wishlist_item_is_rejected(self):
+        WishlistItem.objects.create(user=self.user, product=self.product)
+        response = self.post_wishlist({'product_id': self.product.id}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            WishlistItem.objects.filter(user=self.user, product=self.product).count(), 1,
+        )
+
+    def test_inactive_product_cannot_be_wishlisted(self):
+        self.product.is_active = False
+        self.product.save(update_fields=['is_active'])
+        response = self.post_wishlist({'product_id': self.product.id}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(WishlistItem.objects.filter(user=self.user, product=self.product).exists())
+
+    def test_list_only_returns_current_users_items(self):
+        WishlistItem.objects.create(user=self.user, product=self.product)
+
+        other_product = Product.objects.create(
+            name='Hoodie',
+            description='A hoodie',
+            price='55.00',
+            category=self.category,
+        )
+        WishlistItem.objects.create(user=self.other_user, product=other_product)
+
+        response = self.get_wishlist(self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['product']['id'], self.product.id)
+
+
+class WishlistItemDeleteViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='wishlistdeleteuser',
+            email='wishlistdelete@nostra.com',
+            password='WishlistPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherwishlistdeleteuser',
+            email='otherwishlistdelete@nostra.com',
+            password='WishlistPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.item = WishlistItem.objects.create(user=self.user, product=self.product)
+
+    def delete_item(self, item_id, user):
+        request = self.factory.delete(f'/api/products/wishlist/{item_id}/')
+        force_authenticate(request, user=user)
+        return WishlistItemDeleteView.as_view()(request, pk=item_id)
+
+    def test_unauthenticated_cannot_delete(self):
+        request = self.factory.delete(f'/api/products/wishlist/{self.item.id}/')
+        response = WishlistItemDeleteView.as_view()(request, pk=self.item.id)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_another_user_cannot_delete_someone_elses_item(self):
+        response = self.delete_item(self.item.id, user=self.other_user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(WishlistItem.objects.filter(id=self.item.id).exists())
+
+    def test_successful_delete(self):
+        response = self.delete_item(self.item.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(WishlistItem.objects.filter(id=self.item.id).exists())

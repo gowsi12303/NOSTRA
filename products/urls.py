@@ -8,6 +8,8 @@ from .views import (
     CategoryListView,
     ProductDetailView,
     ProductListView,
+    WishlistItemDeleteView,
+    WishlistListCreateView,
 )
 
 urlpatterns = [
@@ -17,5 +19,7 @@ urlpatterns = [
     path('cart/', CartDetailView.as_view(), name='cart-detail'),
     path('cart/items/', CartAddItemView.as_view(), name='cart-add-item'),
     path('cart/items/<int:pk>/', CartItemDetailView.as_view(), name='cart-item-detail'),
+    path('wishlist/', WishlistListCreateView.as_view(), name='wishlist-list-create'),
+    path('wishlist/<int:pk>/', WishlistItemDeleteView.as_view(), name='wishlist-item-delete'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]

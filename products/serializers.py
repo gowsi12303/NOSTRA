@@ -9,6 +9,7 @@ from .models import (
     ProductImage,
     ProductSize,
     ProductVariant,
+    WishlistItem,
 )
 
 
@@ -165,6 +166,22 @@ class CartSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'items',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class WishlistItemSerializer(serializers.ModelSerializer):
+    # 'user' is intentionally not a field here: the wishlist entry is always
+    # tied to the authenticated request's user by the view (not implemented
+    # yet), never accepted from client input.
+    product = ProductSummarySerializer(read_only=True)
+
+    class Meta:
+        model = WishlistItem
+        fields = [
+            'id',
+            'product',
             'created_at',
             'updated_at',
         ]
