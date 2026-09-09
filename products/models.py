@@ -1,3 +1,4 @@
+from django.core.validators import RegexValidator
 from django.db import models
 
 
@@ -69,3 +70,36 @@ class ProductSize(models.Model):
 
     def __str__(self):
         return f'{self.product.name} - {self.size}'
+
+
+class ProductColor(models.Model):
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='colors',
+    )
+    color_name = models.CharField(max_length=50)
+    hex_code = models.CharField(
+        max_length=7,
+        blank=True,
+        validators=[
+            RegexValidator(
+                regex=r'^#[0-9A-Fa-f]{6}$',
+                message='Enter a valid hex color, e.g. #FF0000.',
+            ),
+        ],
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product', 'color_name'],
+                name='unique_product_color',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.product.name} - {self.color_name}'

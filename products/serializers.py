@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Category, Product, ProductImage, ProductSize
+from .models import Category, Product, ProductColor, ProductImage, ProductSize
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -41,10 +41,24 @@ class ProductSizeSerializer(serializers.ModelSerializer):
         ]
 
 
+class ProductColorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductColor
+        fields = [
+            'id',
+            'color_name',
+            'hex_code',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+
+
 class ProductSerializer(serializers.ModelSerializer):
     category = CategorySerializer(read_only=True)
     images = ProductImageSerializer(many=True, read_only=True)
     sizes = ProductSizeSerializer(many=True, read_only=True)
+    colors = ProductColorSerializer(many=True, read_only=True)
 
     class Meta:
         model = Product
@@ -56,6 +70,7 @@ class ProductSerializer(serializers.ModelSerializer):
             'category',
             'images',
             'sizes',
+            'colors',
             'is_active',
             'created_at',
             'updated_at',

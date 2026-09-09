@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Category, Product, ProductImage, ProductSize
+from .models import Category, Product, ProductColor, ProductImage, ProductSize
 
 
 @admin.register(Category)
@@ -20,12 +20,17 @@ class ProductSizeInline(admin.TabularInline):
     extra = 0
 
 
+class ProductColorInline(admin.TabularInline):
+    model = ProductColor
+    extra = 0
+
+
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = ('name', 'category', 'price', 'is_active', 'has_images', 'created_at', 'updated_at')
     list_filter = ('is_active', 'category')
     search_fields = ('name', 'description')
-    inlines = [ProductImageInline, ProductSizeInline]
+    inlines = [ProductImageInline, ProductSizeInline, ProductColorInline]
 
     @admin.display(boolean=True, description='Has Images')
     def has_images(self, obj):
@@ -44,3 +49,10 @@ class ProductSizeAdmin(admin.ModelAdmin):
     list_display = ('product', 'size', 'stock_quantity', 'is_active', 'created_at', 'updated_at')
     list_filter = ('is_active', 'size')
     search_fields = ('product__name', 'size')
+
+
+@admin.register(ProductColor)
+class ProductColorAdmin(admin.ModelAdmin):
+    list_display = ('product', 'color_name', 'hex_code', 'is_active', 'created_at', 'updated_at')
+    list_filter = ('is_active',)
+    search_fields = ('product__name', 'color_name')

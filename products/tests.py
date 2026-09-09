@@ -1,13 +1,14 @@
 import shutil
 import tempfile
 
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Category, Product, ProductImage, ProductSize
+from .models import Category, Product, ProductColor, ProductImage, ProductSize
 
 # A minimal valid 1x1 GIF, used to satisfy ImageField's Pillow validation
 # without needing a real image file on disk.
@@ -320,3 +321,83 @@ class ProductSizeTests(APITestCase):
         size_id = size.id
         self.product.delete()
         self.assertFalse(ProductSize.objects.filter(id=size_id).exists())
+
+
+class ProductColorTests(APITestCase):
+    def setUp(self):
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.other_product = Product.objects.create(
+            name='Hoodie',
+            description='A hoodie',
+            price='55.00',
+            category=self.category,
+        )
+
+    def test_color_creation(self):
+        color = ProductColor.objects.create(
+            product=self.product,
+            color_name='Red',
+            hex_code='#FF0000',
+        )
+        self.assertEqual(color.color_name, 'Red')
+        self.assertEqual(color.hex_code, '#FF0000')
+        self.assertTrue(color.is_active)
+
+    def test_hex_code_is_optional(self):
+        color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.assertEqual(color.hex_code, '')
+
+    def test_invalid_hex_code_format_is_rejected(self):
+        color = ProductColor(
+            product=self.product,
+            color_name='Red',
+            hex_code='not-a-hex',
+        )
+        with self.assertRaises(ValidationError):
+            color.full_clean()
+
+    def test_product_color_belongs_to_correct_product(self):
+        color = ProductColor.objects.create(product=self.product, color_name='Blue')
+        self.assertEqual(color.product, self.product)
+        self.assertIn(color, self.product.colors.all())
+
+    def test_duplicate_color_for_same_product_is_rejected(self):
+        ProductColor.objects.create(product=self.product, color_name='Red')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ProductColor.objects.create(product=self.product, color_name='Red')
+
+    def test_same_color_can_exist_for_different_products(self):
+        ProductColor.objects.create(product=self.product, color_name='Red')
+        other_color = ProductColor.objects.create(product=self.other_product, color_name='Red')
+        self.assertEqual(other_color.color_name, 'Red')
+        self.assertEqual(other_color.product, self.other_product)
+
+    def test_product_api_includes_colors(self):
+        ProductColor.objects.create(
+            product=self.product,
+            color_name='Red',
+            hex_code='#FF0000',
+        )
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('colors', response.data)
+        self.assertEqual(len(response.data['colors']), 1)
+        self.assertEqual(response.data['colors'][0]['color_name'], 'Red')
+        self.assertEqual(response.data['colors'][0]['hex_code'], '#FF0000')
+
+    def test_product_with_no_colors_returns_empty_colors_list(self):
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertIn('colors', response.data)
+        self.assertEqual(response.data['colors'], [])
+
+    def test_deleting_product_deletes_its_colors(self):
+        color = ProductColor.objects.create(product=self.product, color_name='Red')
+        color_id = color.id
+        self.product.delete()
+        self.assertFalse(ProductColor.objects.filter(id=color_id).exists())
