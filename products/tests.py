@@ -15,6 +15,7 @@ from rest_framework import status
 from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
 
 from .models import (
+    Address,
     Cart,
     CartItem,
     Category,
@@ -25,8 +26,10 @@ from .models import (
     ProductVariant,
     WishlistItem,
 )
-from .serializers import CartItemSerializer, CartSerializer, WishlistItemSerializer
+from .serializers import AddressSerializer, CartItemSerializer, CartSerializer, WishlistItemSerializer
 from .views import (
+    AddressDetailView,
+    AddressListCreateView,
     CartAddItemView,
     CartDetailView,
     CartItemDetailView,
@@ -1434,3 +1437,269 @@ class WishlistItemDeleteViewTests(APITestCase):
         response = self.delete_item(self.item.id, user=self.user)
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(WishlistItem.objects.filter(id=self.item.id).exists())
+
+
+class AddressSerializerTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='addressuser',
+            email='addressuser@nostra.com',
+            password='AddressPass@2026!',
+        )
+        self.address = Address.objects.create(
+            user=self.user,
+            full_name='Jane Doe',
+            phone='9876543210',
+            address_line1='123 Main St',
+            address_line2='Apt 4B',
+            city='Chennai',
+            state='Tamil Nadu',
+            postal_code='600001',
+            is_default=True,
+        )
+
+    def valid_input_data(self, **overrides):
+        data = {
+            'user': self.user.id,
+            'full_name': 'Jane Doe',
+            'phone': '9876543210',
+            'address_line1': '123 Main St',
+            'city': 'Chennai',
+            'state': 'Tamil Nadu',
+            'postal_code': '600001',
+        }
+        data.update(overrides)
+        return data
+
+    def test_all_expected_fields_are_serialized(self):
+        data = AddressSerializer(self.address).data
+        self.assertEqual(
+            set(data.keys()),
+            {
+                'id', 'full_name', 'phone', 'address_line1', 'address_line2',
+                'city', 'state', 'postal_code', 'country', 'is_default',
+                'created_at', 'updated_at',
+            },
+        )
+
+    def test_user_is_not_exposed(self):
+        data = AddressSerializer(self.address).data
+        self.assertNotIn('user', data)
+
+    def test_user_cannot_be_supplied_as_writable_input(self):
+        serializer = AddressSerializer(data=self.valid_input_data())
+        self.assertNotIn('user', serializer.fields)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('user', serializer.validated_data)
+
+    def test_address_details_serialize_correctly(self):
+        data = AddressSerializer(self.address).data
+        self.assertEqual(data['id'], self.address.id)
+        self.assertEqual(data['full_name'], 'Jane Doe')
+        self.assertEqual(data['phone'], '9876543210')
+        self.assertEqual(data['address_line1'], '123 Main St')
+        self.assertEqual(data['address_line2'], 'Apt 4B')
+        self.assertEqual(data['city'], 'Chennai')
+        self.assertEqual(data['state'], 'Tamil Nadu')
+        self.assertEqual(data['postal_code'], '600001')
+        self.assertEqual(data['country'], 'India')
+        self.assertTrue(data['is_default'])
+
+
+class AddressListCreateViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='addressviewuser',
+            email='addressview@nostra.com',
+            password='AddressPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otheraddressuser',
+            email='otheraddress@nostra.com',
+            password='AddressPass@2026!',
+        )
+
+    def valid_address_data(self, **overrides):
+        data = {
+            'full_name': 'Jane Doe',
+            'phone': '9876543210',
+            'address_line1': '123 Main St',
+            'city': 'Chennai',
+            'state': 'Tamil Nadu',
+            'postal_code': '600001',
+        }
+        data.update(overrides)
+        return data
+
+    def get_addresses(self, user):
+        request = self.factory.get('/api/products/addresses/')
+        force_authenticate(request, user=user)
+        return AddressListCreateView.as_view()(request)
+
+    def post_address(self, data, user):
+        request = self.factory.post('/api/products/addresses/', data, format='json')
+        force_authenticate(request, user=user)
+        return AddressListCreateView.as_view()(request)
+
+    def test_unauthenticated_access_is_rejected(self):
+        request = self.factory.get('/api/products/addresses/')
+        response = AddressListCreateView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_unauthenticated_cannot_create(self):
+        request = self.factory.post(
+            '/api/products/addresses/', self.valid_address_data(), format='json',
+        )
+        response = AddressListCreateView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_empty_address_list(self):
+        response = self.get_addresses(self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_create_normal_address(self):
+        response = self.post_address(self.valid_address_data(), user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['full_name'], 'Jane Doe')
+        self.assertFalse(response.data['is_default'])
+        address = Address.objects.get(user=self.user)
+        self.assertEqual(address.full_name, 'Jane Doe')
+
+    def test_create_default_address(self):
+        response = self.post_address(self.valid_address_data(is_default=True), user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['is_default'])
+        address = Address.objects.get(user=self.user)
+        self.assertTrue(address.is_default)
+
+    def test_creating_new_default_unsets_previous_default(self):
+        first = self.post_address(self.valid_address_data(is_default=True), user=self.user)
+        self.assertTrue(first.data['is_default'])
+
+        second = self.post_address(
+            self.valid_address_data(full_name='John Smith', is_default=True), user=self.user,
+        )
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(second.data['is_default'])
+
+        first_address = Address.objects.get(id=first.data['id'])
+        second_address = Address.objects.get(id=second.data['id'])
+        self.assertFalse(first_address.is_default)
+        self.assertTrue(second_address.is_default)
+
+    def test_list_only_returns_current_users_addresses(self):
+        self.post_address(self.valid_address_data(), user=self.user)
+        self.post_address(self.valid_address_data(full_name='Other'), user=self.other_user)
+
+        response = self.get_addresses(self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['full_name'], 'Jane Doe')
+
+    def test_default_address_is_listed_first(self):
+        self.post_address(self.valid_address_data(full_name='First'), user=self.user)
+        default_response = self.post_address(
+            self.valid_address_data(full_name='Default One', is_default=True), user=self.user,
+        )
+        response = self.get_addresses(self.user)
+        self.assertEqual(response.data[0]['id'], default_response.data['id'])
+        self.assertTrue(response.data[0]['is_default'])
+
+
+class AddressDetailViewTests(APITestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username='addressdetailuser',
+            email='addressdetail@nostra.com',
+            password='AddressPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otheraddressdetailuser',
+            email='otheraddressdetail@nostra.com',
+            password='AddressPass@2026!',
+        )
+        self.address = Address.objects.create(
+            user=self.user,
+            full_name='Jane Doe',
+            phone='9876543210',
+            address_line1='123 Main St',
+            city='Chennai',
+            state='Tamil Nadu',
+            postal_code='600001',
+        )
+
+    def get_address(self, pk, user):
+        request = self.factory.get(f'/api/products/addresses/{pk}/')
+        force_authenticate(request, user=user)
+        return AddressDetailView.as_view()(request, pk=pk)
+
+    def patch_address(self, pk, data, user):
+        request = self.factory.patch(f'/api/products/addresses/{pk}/', data, format='json')
+        force_authenticate(request, user=user)
+        return AddressDetailView.as_view()(request, pk=pk)
+
+    def delete_address(self, pk, user):
+        request = self.factory.delete(f'/api/products/addresses/{pk}/')
+        force_authenticate(request, user=user)
+        return AddressDetailView.as_view()(request, pk=pk)
+
+    def test_unauthenticated_cannot_retrieve(self):
+        request = self.factory.get(f'/api/products/addresses/{self.address.id}/')
+        response = AddressDetailView.as_view()(request, pk=self.address.id)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_retrieve_own_address(self):
+        response = self.get_address(self.address.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.address.id)
+
+    def test_another_user_cannot_retrieve_someone_elses_address(self):
+        response = self.get_address(self.address.id, user=self.other_user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_update_own_address(self):
+        response = self.patch_address(self.address.id, {'city': 'Bengaluru'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['city'], 'Bengaluru')
+        self.address.refresh_from_db()
+        self.assertEqual(self.address.city, 'Bengaluru')
+
+    def test_setting_updated_address_as_default_unsets_previous_default(self):
+        other_default = Address.objects.create(
+            user=self.user,
+            full_name='Old Default',
+            phone='9876543211',
+            address_line1='456 Second St',
+            city='Chennai',
+            state='Tamil Nadu',
+            postal_code='600002',
+            is_default=True,
+        )
+
+        response = self.patch_address(self.address.id, {'is_default': True}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_default'])
+
+        self.address.refresh_from_db()
+        other_default.refresh_from_db()
+        self.assertTrue(self.address.is_default)
+        self.assertFalse(other_default.is_default)
+
+    def test_another_user_cannot_update_someone_elses_address(self):
+        response = self.patch_address(self.address.id, {'city': 'Mumbai'}, user=self.other_user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.address.refresh_from_db()
+        self.assertEqual(self.address.city, 'Chennai')
+
+    def test_delete_own_address(self):
+        response = self.delete_address(self.address.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Address.objects.filter(id=self.address.id).exists())
+
+    def test_another_user_cannot_delete_someone_elses_address(self):
+        response = self.delete_address(self.address.id, user=self.other_user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(Address.objects.filter(id=self.address.id).exists())

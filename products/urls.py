@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    AddressDetailView,
+    AddressListCreateView,
     CartAddItemView,
     CartDetailView,
     CartItemDetailView,
@@ -21,5 +23,7 @@ urlpatterns = [
     path('cart/items/<int:pk>/', CartItemDetailView.as_view(), name='cart-item-detail'),
     path('wishlist/', WishlistListCreateView.as_view(), name='wishlist-list-create'),
     path('wishlist/<int:pk>/', WishlistItemDeleteView.as_view(), name='wishlist-item-delete'),
+    path('addresses/', AddressListCreateView.as_view(), name='address-list-create'),
+    path('addresses/<int:pk>/', AddressDetailView.as_view(), name='address-detail'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]

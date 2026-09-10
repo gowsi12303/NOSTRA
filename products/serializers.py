@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import (
+    Address,
     Cart,
     CartItem,
     Category,
@@ -182,6 +183,28 @@ class WishlistItemSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'product',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class AddressSerializer(serializers.ModelSerializer):
+    # 'user' is intentionally not a field here: an address is always tied to
+    # the authenticated request's user by the view (not implemented yet),
+    # never accepted from client input.
+    class Meta:
+        model = Address
+        fields = [
+            'id',
+            'full_name',
+            'phone',
+            'address_line1',
+            'address_line2',
+            'city',
+            'state',
+            'postal_code',
+            'country',
+            'is_default',
             'created_at',
             'updated_at',
         ]

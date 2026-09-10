@@ -8,9 +8,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .filters import ProductFilter
-from .models import Cart, CartItem, Category, Product, ProductVariant, WishlistItem
+from .models import Address, Cart, CartItem, Category, Product, ProductVariant, WishlistItem
 from .pagination import ProductPagination
 from .serializers import (
+    AddressSerializer,
     CartItemSerializer,
     CartSerializer,
     CategorySerializer,
@@ -219,3 +220,44 @@ class WishlistItemDeleteView(generics.DestroyAPIView):
 
     def get_queryset(self):
         return WishlistItem.objects.filter(user=self.request.user)
+
+
+# --- Address --------------------------------------------------------------
+
+class AddressListCreateView(generics.ListCreateAPIView):
+    """GET: the authenticated user's addresses, default first then newest.
+    POST: create an address for the authenticated user. Setting is_default
+    unsets any previous default for that user."""
+    serializer_class = AddressSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Address.objects.filter(user=self.request.user).order_by('-is_default', '-created_at')
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            if serializer.validated_data.get('is_default'):
+                Address.objects.filter(
+                    user=self.request.user, is_default=True,
+                ).update(is_default=False)
+            serializer.save(user=self.request.user)
+
+
+class AddressDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update, or delete a single Address — scoped to the
+    authenticated user's own addresses, so another user's address is
+    unreachable (404, not 403). Setting is_default on update unsets any
+    other default for that user."""
+    serializer_class = AddressSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Address.objects.filter(user=self.request.user)
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            if serializer.validated_data.get('is_default'):
+                Address.objects.filter(
+                    user=self.request.user, is_default=True,
+                ).exclude(pk=serializer.instance.pk).update(is_default=False)
+            serializer.save()
