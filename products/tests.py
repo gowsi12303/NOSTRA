@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+from decimal import Decimal
 
 from django.conf import settings
 from django.conf.urls.static import static
@@ -7,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
+from django.db.models.deletion import ProtectedError
 from django.test import RequestFactory, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import resolve
@@ -19,6 +21,8 @@ from .models import (
     Cart,
     CartItem,
     Category,
+    Order,
+    OrderItem,
     Product,
     ProductColor,
     ProductImage,
@@ -26,7 +30,14 @@ from .models import (
     ProductVariant,
     WishlistItem,
 )
-from .serializers import AddressSerializer, CartItemSerializer, CartSerializer, WishlistItemSerializer
+from .serializers import (
+    AddressSerializer,
+    CartItemSerializer,
+    CartSerializer,
+    OrderItemSerializer,
+    OrderSerializer,
+    WishlistItemSerializer,
+)
 from .views import (
     AddressDetailView,
     AddressListCreateView,
@@ -1703,3 +1714,443 @@ class AddressDetailViewTests(APITestCase):
         response = self.delete_address(self.address.id, user=self.other_user)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertTrue(Address.objects.filter(id=self.address.id).exists())
+
+
+class OrderModelTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderuser',
+            email='orderuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            stock_quantity=10,
+        )
+
+    def create_order(self, **overrides):
+        data = {
+            'user': self.user,
+            'order_number': 'ORD-0001',
+            'shipping_full_name': 'Jane Doe',
+            'shipping_phone': '9876543210',
+            'shipping_address_line1': '123 Main St',
+            'shipping_city': 'Chennai',
+            'shipping_state': 'Tamil Nadu',
+            'shipping_postal_code': '600001',
+            'shipping_country': 'India',
+            'subtotal': '50.00',
+            'total_amount': '50.00',
+        }
+        data.update(overrides)
+        return Order.objects.create(**data)
+
+    def test_order_created_with_default_status_pending(self):
+        order = self.create_order()
+        self.assertEqual(order.status, Order.Status.PENDING)
+
+    def test_order_number_must_be_unique(self):
+        self.create_order(order_number='ORD-DUP')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.create_order(order_number='ORD-DUP')
+
+    def test_shipping_snapshot_fields_are_stored_correctly(self):
+        order = self.create_order(
+            shipping_full_name='John Smith',
+            shipping_phone='9123456780',
+            shipping_address_line1='456 Second St',
+            shipping_address_line2='Apt 2',
+            shipping_city='Bengaluru',
+            shipping_state='Karnataka',
+            shipping_postal_code='560001',
+            shipping_country='India',
+        )
+        self.assertEqual(order.shipping_full_name, 'John Smith')
+        self.assertEqual(order.shipping_phone, '9123456780')
+        self.assertEqual(order.shipping_address_line1, '456 Second St')
+        self.assertEqual(order.shipping_address_line2, 'Apt 2')
+        self.assertEqual(order.shipping_city, 'Bengaluru')
+        self.assertEqual(order.shipping_state, 'Karnataka')
+        self.assertEqual(order.shipping_postal_code, '560001')
+        self.assertEqual(order.shipping_country, 'India')
+
+    def test_subtotal_and_total_amount_are_stored_correctly(self):
+        order = self.create_order(subtotal='99.99', total_amount='109.99')
+        order.refresh_from_db()
+        self.assertEqual(order.subtotal, Decimal('99.99'))
+        self.assertEqual(order.total_amount, Decimal('109.99'))
+
+    def test_order_user_uses_protect_behavior(self):
+        self.create_order()
+        with self.assertRaises(ProtectedError):
+            self.user.delete()
+
+
+class OrderItemModelTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderitemuser',
+            email='orderitemuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            stock_quantity=10,
+        )
+        self.order = Order.objects.create(
+            user=self.user,
+            order_number='ORD-1000',
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal='50.00',
+            total_amount='50.00',
+        )
+
+    def test_order_item_can_be_created_for_order(self):
+        item = OrderItem.objects.create(
+            order=self.order,
+            variant=self.variant,
+            quantity=2,
+            unit_price='25.00',
+        )
+        self.assertEqual(item.order, self.order)
+        self.assertEqual(item.variant, self.variant)
+        self.assertIn(item, self.order.items.all())
+
+    def test_order_item_quantity_must_be_at_least_one(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                OrderItem.objects.create(
+                    order=self.order,
+                    variant=self.variant,
+                    quantity=0,
+                    unit_price='25.00',
+                )
+
+    def test_order_item_unit_price_stores_purchase_time_price(self):
+        item = OrderItem.objects.create(
+            order=self.order,
+            variant=self.variant,
+            quantity=1,
+            unit_price='25.00',
+        )
+        # The product's price changes later; the order item must keep the
+        # price that was actually charged at purchase time.
+        self.product.price = '40.00'
+        self.product.save(update_fields=['price'])
+
+        item.refresh_from_db()
+        self.assertEqual(item.unit_price, Decimal('25.00'))
+
+    def test_order_item_variant_uses_protect_behavior(self):
+        OrderItem.objects.create(
+            order=self.order,
+            variant=self.variant,
+            quantity=1,
+            unit_price='25.00',
+        )
+        with self.assertRaises(ProtectedError):
+            self.variant.delete()
+
+
+class OrderSerializerTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderserializeruser',
+            email='orderserializer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            sku='TSHIRT-RED-M',
+            stock_quantity=10,
+        )
+        self.order = Order.objects.create(
+            user=self.user,
+            order_number='ORD-2000',
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal='50.00',
+            total_amount='50.00',
+        )
+        self.item = OrderItem.objects.create(
+            order=self.order,
+            variant=self.variant,
+            quantity=2,
+            unit_price='25.00',
+        )
+
+    def test_order_serialization_includes_expected_fields(self):
+        data = OrderSerializer(self.order).data
+        self.assertEqual(
+            set(data.keys()),
+            {
+                'id', 'order_number', 'status',
+                'shipping_full_name', 'shipping_phone', 'shipping_address_line1',
+                'shipping_address_line2', 'shipping_city', 'shipping_state',
+                'shipping_postal_code', 'shipping_country',
+                'subtotal', 'total_amount', 'items',
+                'created_at', 'updated_at',
+            },
+        )
+
+    def test_order_serializer_does_not_expose_user(self):
+        data = OrderSerializer(self.order).data
+        self.assertNotIn('user', data)
+
+    def test_order_serializer_user_is_not_writable(self):
+        serializer = OrderSerializer(data={
+            'user': self.user.id,
+            'order_number': 'ORD-9999',
+            'shipping_full_name': 'Jane Doe',
+            'shipping_phone': '9876543210',
+            'shipping_address_line1': '123 Main St',
+            'shipping_city': 'Chennai',
+            'shipping_state': 'Tamil Nadu',
+            'shipping_postal_code': '600001',
+            'shipping_country': 'India',
+            'subtotal': '50.00',
+            'total_amount': '50.00',
+        })
+        self.assertNotIn('user', serializer.fields)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('user', serializer.validated_data)
+
+    def test_order_serializer_includes_items(self):
+        data = OrderSerializer(self.order).data
+        self.assertEqual(len(data['items']), 1)
+        self.assertEqual(data['items'][0]['id'], self.item.id)
+
+    def test_order_item_serialization_includes_expected_fields(self):
+        data = OrderItemSerializer(self.item).data
+        self.assertEqual(
+            set(data.keys()),
+            {'id', 'variant', 'quantity', 'unit_price', 'created_at'},
+        )
+        self.assertEqual(data['quantity'], 2)
+        self.assertEqual(data['unit_price'], '25.00')
+
+    def test_order_item_serialization_includes_nested_variant_product_size_color(self):
+        data = OrderItemSerializer(self.item).data
+        variant_data = data['variant']
+
+        self.assertEqual(variant_data['id'], self.variant.id)
+        self.assertEqual(variant_data['sku'], 'TSHIRT-RED-M')
+        self.assertEqual(variant_data['stock_quantity'], 10)
+        self.assertTrue(variant_data['is_active'])
+
+        self.assertEqual(variant_data['product']['id'], self.product.id)
+        self.assertEqual(variant_data['product']['name'], 'T-Shirt')
+        self.assertEqual(variant_data['product']['price'], '25.00')
+
+        self.assertEqual(variant_data['size']['size'], 'M')
+        self.assertEqual(variant_data['color']['color_name'], 'Red')
+
+
+class OrderListAPITests(APITestCase):
+    url = '/api/products/orders/'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderapiuser',
+            email='orderapi@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherorderapiuser',
+            email='otherorderapi@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            stock_quantity=10,
+        )
+
+    def create_order(self, user, order_number, **overrides):
+        data = {
+            'user': user,
+            'order_number': order_number,
+            'shipping_full_name': 'Jane Doe',
+            'shipping_phone': '9876543210',
+            'shipping_address_line1': '123 Main St',
+            'shipping_city': 'Chennai',
+            'shipping_state': 'Tamil Nadu',
+            'shipping_postal_code': '600001',
+            'shipping_country': 'India',
+            'subtotal': '25.00',
+            'total_amount': '25.00',
+        }
+        data.update(overrides)
+        return Order.objects.create(**data)
+
+    def test_unauthenticated_access_is_rejected(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_returns_only_current_users_orders(self):
+        own_order = self.create_order(self.user, 'ORD-OWN')
+        self.create_order(self.other_user, 'ORD-OTHER')
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['id'], own_order.id)
+
+    def test_orders_are_returned_newest_first(self):
+        first = self.create_order(self.user, 'ORD-FIRST')
+        second = self.create_order(self.user, 'ORD-SECOND')
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        ids = [item['id'] for item in response.data]
+        self.assertEqual(ids, [second.id, first.id])
+
+    def test_list_includes_nested_order_items(self):
+        order = self.create_order(self.user, 'ORD-ITEMS')
+        item = OrderItem.objects.create(
+            order=order, variant=self.variant, quantity=2, unit_price='25.00',
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        order_data = response.data[0]
+        self.assertEqual(len(order_data['items']), 1)
+        self.assertEqual(order_data['items'][0]['id'], item.id)
+        self.assertEqual(order_data['items'][0]['variant']['id'], self.variant.id)
+
+
+class OrderDetailAPITests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderdetailapiuser',
+            email='orderdetailapi@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherorderdetailapiuser',
+            email='otherorderdetailapi@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            sku='TSHIRT-RED-M',
+            stock_quantity=10,
+        )
+        self.order = Order.objects.create(
+            user=self.user,
+            order_number='ORD-3000',
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal='50.00',
+            total_amount='50.00',
+        )
+        self.item = OrderItem.objects.create(
+            order=self.order, variant=self.variant, quantity=2, unit_price='25.00',
+        )
+
+    def detail_url(self, pk):
+        return f'/api/products/orders/{pk}/'
+
+    def test_unauthenticated_access_is_rejected(self):
+        response = self.client.get(self.detail_url(self.order.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_retrieve_own_order(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.detail_url(self.order.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.order.id)
+        self.assertEqual(response.data['order_number'], 'ORD-3000')
+
+    def test_another_user_cannot_retrieve_someone_elses_order(self):
+        self.client.force_authenticate(user=self.other_user)
+        response = self.client.get(self.detail_url(self.order.id))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_nonexistent_order_returns_404(self):
+        self.client.force_authenticate(user=self.user)
+        nonexistent_id = self.order.id + 1000
+        response = self.client.get(self.detail_url(nonexistent_id))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_detail_includes_nested_order_items(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.detail_url(self.order.id))
+        self.assertEqual(len(response.data['items']), 1)
+        item_data = response.data['items'][0]
+        self.assertEqual(item_data['id'], self.item.id)
+        self.assertEqual(item_data['quantity'], 2)
+        self.assertEqual(item_data['variant']['id'], self.variant.id)
+        self.assertEqual(item_data['variant']['product']['id'], self.product.id)
+        self.assertEqual(item_data['variant']['size']['size'], 'M')
+        self.assertEqual(item_data['variant']['color']['color_name'], 'Red')

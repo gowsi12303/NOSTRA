@@ -8,6 +8,8 @@ from .views import (
     CartItemDetailView,
     CategoryDetailView,
     CategoryListView,
+    OrderDetailView,
+    OrderListView,
     ProductDetailView,
     ProductListView,
     WishlistItemDeleteView,
@@ -25,5 +27,7 @@ urlpatterns = [
     path('wishlist/<int:pk>/', WishlistItemDeleteView.as_view(), name='wishlist-item-delete'),
     path('addresses/', AddressListCreateView.as_view(), name='address-list-create'),
     path('addresses/<int:pk>/', AddressDetailView.as_view(), name='address-detail'),
+    path('orders/', OrderListView.as_view(), name='order-list'),
+    path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]

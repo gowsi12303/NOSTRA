@@ -5,6 +5,8 @@ from .models import (
     Cart,
     CartItem,
     Category,
+    Order,
+    OrderItem,
     Product,
     ProductColor,
     ProductImage,
@@ -205,6 +207,51 @@ class AddressSerializer(serializers.ModelSerializer):
             'postal_code',
             'country',
             'is_default',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    # Reuses the same variant-with-product/size/color representation already
+    # used for cart line items — a purchased line item needs the same
+    # context (what was bought, in which size/color) as a cart line item.
+    variant = CartItemVariantSerializer(read_only=True)
+
+    class Meta:
+        model = OrderItem
+        fields = [
+            'id',
+            'variant',
+            'quantity',
+            'unit_price',
+            'created_at',
+        ]
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    # 'user' is intentionally not a field here: an order always belongs to
+    # the authenticated request's user by the view (not implemented yet),
+    # never accepted from client input.
+    items = OrderItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            'id',
+            'order_number',
+            'status',
+            'shipping_full_name',
+            'shipping_phone',
+            'shipping_address_line1',
+            'shipping_address_line2',
+            'shipping_city',
+            'shipping_state',
+            'shipping_postal_code',
+            'shipping_country',
+            'subtotal',
+            'total_amount',
+            'items',
             'created_at',
             'updated_at',
         ]

@@ -8,13 +8,24 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .filters import ProductFilter
-from .models import Address, Cart, CartItem, Category, Product, ProductVariant, WishlistItem
+from .models import (
+    Address,
+    Cart,
+    CartItem,
+    Category,
+    Order,
+    OrderItem,
+    Product,
+    ProductVariant,
+    WishlistItem,
+)
 from .pagination import ProductPagination
 from .serializers import (
     AddressSerializer,
     CartItemSerializer,
     CartSerializer,
     CategorySerializer,
+    OrderSerializer,
     ProductSerializer,
     WishlistItemSerializer,
 )
@@ -261,3 +272,37 @@ class AddressDetailView(generics.RetrieveUpdateDestroyAPIView):
                     user=self.request.user, is_default=True,
                 ).exclude(pk=serializer.instance.pk).update(is_default=False)
             serializer.save()
+
+
+# --- Order (read-only) ------------------------------------------------
+
+def _user_orders_optimized(user):
+    """A user's orders with items and each item's variant/product/size/color
+    fetched up front to avoid N+1 queries when OrderSerializer nests them."""
+    return Order.objects.filter(user=user).prefetch_related(
+        Prefetch(
+            'items',
+            queryset=OrderItem.objects.select_related(
+                'variant__product', 'variant__size', 'variant__color',
+            ),
+        ),
+    )
+
+
+class OrderListView(generics.ListAPIView):
+    """The authenticated user's own orders, newest first."""
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return _user_orders_optimized(self.request.user).order_by('-created_at')
+
+
+class OrderDetailView(generics.RetrieveAPIView):
+    """A single order — scoped to the authenticated user's own orders, so
+    another user's order is unreachable (404, not 403)."""
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return _user_orders_optimized(self.request.user)
