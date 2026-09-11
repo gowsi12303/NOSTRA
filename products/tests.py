@@ -2154,3 +2154,304 @@ class OrderDetailAPITests(APITestCase):
         self.assertEqual(item_data['variant']['product']['id'], self.product.id)
         self.assertEqual(item_data['variant']['size']['size'], 'M')
         self.assertEqual(item_data['variant']['color']['color_name'], 'Red')
+
+
+class OrderPlaceAPITests(APITestCase):
+    url = '/api/products/orders/place/'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='placeorderuser',
+            email='placeorder@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherplaceorderuser',
+            email='otherplaceorder@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.color = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            color=self.color,
+            stock_quantity=10,
+        )
+        self.address = Address.objects.create(
+            user=self.user,
+            full_name='Jane Doe',
+            phone='9876543210',
+            address_line1='123 Main St',
+            city='Chennai',
+            state='Tamil Nadu',
+            postal_code='600001',
+            is_default=True,
+        )
+        self.other_address = Address.objects.create(
+            user=self.other_user,
+            full_name='John Smith',
+            phone='9123456780',
+            address_line1='456 Second St',
+            city='Bengaluru',
+            state='Karnataka',
+            postal_code='560001',
+        )
+
+    def add_to_cart(self, variant, quantity, user=None):
+        cart, _ = Cart.objects.get_or_create(user=user or self.user)
+        return CartItem.objects.create(cart=cart, variant=variant, quantity=quantity)
+
+    def place_order(self, data=None, user=None):
+        self.client.force_authenticate(user=user or self.user)
+        return self.client.post(self.url, data or {}, format='json')
+
+    # -- authentication / basic gating ------------------------------------
+
+    def test_unauthenticated_request_is_rejected(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.client.post(self.url, {'address_id': self.address.id}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_empty_cart_is_rejected(self):
+        response = self.place_order({'address_id': self.address.id})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_missing_address_and_no_default_is_rejected(self):
+        self.address.is_default = False
+        self.address.save(update_fields=['is_default'])
+        self.add_to_cart(self.variant, 1)
+
+        response = self.place_order({})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_missing_address_uses_default_address(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.place_order({})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['shipping_full_name'], 'Jane Doe')
+
+    def test_another_users_address_is_rejected(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.place_order({'address_id': self.other_address.id})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Order.objects.count(), 0)
+
+    # -- availability / stock validation -----------------------------------
+
+    def test_inactive_variant_is_rejected(self):
+        self.variant.is_active = False
+        self.variant.save(update_fields=['is_active'])
+        self.add_to_cart(self.variant, 1)
+
+        response = self.place_order({'address_id': self.address.id})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+        # rollback: cart item and stock untouched
+        self.assertTrue(CartItem.objects.filter(cart__user=self.user).exists())
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_inactive_product_is_rejected(self):
+        self.product.is_active = False
+        self.product.save(update_fields=['is_active'])
+        self.add_to_cart(self.variant, 1)
+
+        response = self.place_order({'address_id': self.address.id})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertTrue(CartItem.objects.filter(cart__user=self.user).exists())
+
+    def test_insufficient_stock_is_rejected(self):
+        self.add_to_cart(self.variant, 11)  # only 10 in stock
+
+        response = self.place_order({'address_id': self.address.id})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_rollback_leaves_no_partial_order_with_multiple_items(self):
+        other_variant = ProductVariant.objects.create(
+            product=self.product,
+            size=ProductSize.objects.create(product=self.product, size='L'),
+            stock_quantity=1,
+        )
+        self.add_to_cart(self.variant, 2)
+        self.add_to_cart(other_variant, 5)  # exceeds stock of 1
+
+        response = self.place_order({'address_id': self.address.id})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        # neither item's stock was touched, even though the first was valid
+        self.variant.refresh_from_db()
+        other_variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+        self.assertEqual(other_variant.stock_quantity, 1)
+        self.assertEqual(CartItem.objects.filter(cart__user=self.user).count(), 2)
+
+    # -- successful checkout -------------------------------------------------
+
+    def test_successful_checkout(self):
+        self.add_to_cart(self.variant, 2)
+        response = self.place_order({'address_id': self.address.id})
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Order.objects.count(), 1)
+        order = Order.objects.get()
+        self.assertEqual(order.user, self.user)
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertEqual(response.data['id'], order.id)
+        self.assertEqual(len(response.data['items']), 1)
+
+    def test_stock_is_decremented_after_checkout(self):
+        self.add_to_cart(self.variant, 3)
+        self.place_order({'address_id': self.address.id})
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 7)
+
+    def test_cart_is_cleared_after_checkout(self):
+        self.add_to_cart(self.variant, 1)
+        self.place_order({'address_id': self.address.id})
+
+        self.assertFalse(CartItem.objects.filter(cart__user=self.user).exists())
+        # the Cart row itself is kept, not deleted
+        self.assertTrue(Cart.objects.filter(user=self.user).exists())
+
+    def test_shipping_address_is_snapshotted(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.place_order({'address_id': self.address.id})
+        order = Order.objects.get(id=response.data['id'])
+
+        self.assertEqual(order.shipping_full_name, 'Jane Doe')
+        self.assertEqual(order.shipping_city, 'Chennai')
+
+        # mutating the saved Address afterward must not change the order
+        self.address.full_name = 'Changed Name'
+        self.address.city = 'Mumbai'
+        self.address.save(update_fields=['full_name', 'city'])
+
+        order.refresh_from_db()
+        self.assertEqual(order.shipping_full_name, 'Jane Doe')
+        self.assertEqual(order.shipping_city, 'Chennai')
+
+    def test_unit_price_snapshot(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.place_order({'address_id': self.address.id})
+        order = Order.objects.get(id=response.data['id'])
+        item = order.items.get()
+        self.assertEqual(item.unit_price, Decimal('25.00'))
+
+        # changing the product's price afterward must not change the order item
+        self.product.price = '99.99'
+        self.product.save(update_fields=['price'])
+
+        item.refresh_from_db()
+        self.assertEqual(item.unit_price, Decimal('25.00'))
+
+    def test_subtotal_and_total_amount_calculation(self):
+        other_variant = ProductVariant.objects.create(
+            product=self.product,
+            color=ProductColor.objects.create(product=self.product, color_name='Blue'),
+            stock_quantity=5,
+        )
+        self.add_to_cart(self.variant, 2)   # 2 x 25.00 = 50.00
+        self.add_to_cart(other_variant, 1)  # 1 x 25.00 = 25.00
+
+        response = self.place_order({'address_id': self.address.id})
+        order = Order.objects.get(id=response.data['id'])
+        order.refresh_from_db()
+
+        self.assertEqual(order.subtotal, Decimal('75.00'))
+        self.assertEqual(order.total_amount, Decimal('75.00'))
+
+    def test_order_user_is_server_controlled(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.place_order({
+            'address_id': self.address.id,
+            'user': self.other_user.id,
+        })
+        order = Order.objects.get(id=response.data['id'])
+        self.assertEqual(order.user, self.user)
+
+    def test_bogus_client_fields_are_ignored(self):
+        self.add_to_cart(self.variant, 1)
+        response = self.place_order({
+            'address_id': self.address.id,
+            'unit_price': '0.01',
+            'quantity': 999,
+            'subtotal': '0.01',
+            'total_amount': '0.01',
+            'order_number': 'HACKED-0001',
+            'status': Order.Status.DELIVERED,
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        order = Order.objects.get(id=response.data['id'])
+        self.assertEqual(order.subtotal, Decimal('25.00'))
+        self.assertEqual(order.total_amount, Decimal('25.00'))
+        self.assertNotEqual(order.order_number, 'HACKED-0001')
+        self.assertEqual(order.status, Order.Status.PENDING)
+        item = order.items.get()
+        self.assertEqual(item.unit_price, Decimal('25.00'))
+        self.assertEqual(item.quantity, 1)
+
+    def test_order_number_uniqueness_across_orders(self):
+        self.add_to_cart(self.variant, 1)
+        first = self.place_order({'address_id': self.address.id})
+
+        self.add_to_cart(self.variant, 1)
+        second = self.place_order({'address_id': self.address.id})
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(first.data['order_number'], second.data['order_number'])
+
+    def test_sequential_stock_race_scenario(self):
+        scarce_variant = ProductVariant.objects.create(
+            product=self.product,
+            size=ProductSize.objects.create(product=self.product, size='XL'),
+            stock_quantity=1,
+        )
+        self.add_to_cart(scarce_variant, 1, user=self.user)
+        self.add_to_cart(scarce_variant, 1, user=self.other_user)
+
+        first = self.place_order({'address_id': self.address.id}, user=self.user)
+        second = self.place_order({'address_id': self.other_address.id}, user=self.other_user)
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+        scarce_variant.refresh_from_db()
+        self.assertEqual(scarce_variant.stock_quantity, 0)
+        self.assertEqual(Order.objects.filter(user=self.other_user).count(), 0)
+
+    def test_existing_order_and_cart_apis_still_work_after_checkout(self):
+        self.add_to_cart(self.variant, 1)
+        place_response = self.place_order({'address_id': self.address.id})
+        order_id = place_response.data['id']
+
+        self.client.force_authenticate(user=self.user)
+
+        cart_response = self.client.get('/api/products/cart/')
+        self.assertEqual(cart_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(cart_response.data['items'], [])
+
+        list_response = self.client.get('/api/products/orders/')
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(list_response.data[0]['id'], order_id)
+
+        detail_response = self.client.get(f'/api/products/orders/{order_id}/')
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['id'], order_id)

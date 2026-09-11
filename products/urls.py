@@ -10,6 +10,7 @@ from .views import (
     CategoryListView,
     OrderDetailView,
     OrderListView,
+    OrderPlaceView,
     ProductDetailView,
     ProductListView,
     WishlistItemDeleteView,
@@ -28,6 +29,7 @@ urlpatterns = [
     path('addresses/', AddressListCreateView.as_view(), name='address-list-create'),
     path('addresses/<int:pk>/', AddressDetailView.as_view(), name='address-detail'),
     path('orders/', OrderListView.as_view(), name='order-list'),
+    path('orders/place/', OrderPlaceView.as_view(), name='order-place'),
     path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]

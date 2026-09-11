@@ -1,6 +1,9 @@
+import uuid
+
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import F, Prefetch
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, serializers, status
 from rest_framework.filters import OrderingFilter, SearchFilter
@@ -306,3 +309,140 @@ class OrderDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return _user_orders_optimized(self.request.user)
+
+
+# --- Place Order --------------------------------------------------------
+
+class PlaceOrderInputSerializer(serializers.Serializer):
+    # Only ever a reference to one of the user's own saved addresses.
+    # Nothing else (price, quantity, totals, user, order_number) is ever
+    # accepted here — those are always computed/assigned server-side.
+    address_id = serializers.IntegerField(required=False)
+
+
+class _CheckoutError(Exception):
+    """Raised to abort the checkout transaction with a clean 400 response.
+    Used instead of returning a Response directly from inside a `with
+    transaction.atomic()` block once writes have started, since only a
+    raised exception actually triggers Django's rollback."""
+
+    def __init__(self, detail):
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _generate_order_number():
+    return f'ORD-{timezone.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:6].upper()}'
+
+
+class OrderPlaceView(generics.GenericAPIView):
+    """Place an order from the authenticated user's current cart.
+
+    Validates address ownership, cart contents, variant/product
+    availability, and stock (under row locks, re-checked after locking);
+    snapshots the purchase-time price and shipping address; decrements
+    stock with an atomic conditional update; creates the Order and its
+    OrderItems; and empties the cart — all inside one transaction, so any
+    failure leaves every one of those untouched."""
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        input_serializer = PlaceOrderInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        address_id = input_serializer.validated_data.get('address_id')
+
+        if address_id is not None:
+            # Scoped to request.user: another user's address 404s, it is
+            # never usable regardless of whether it exists.
+            address = get_object_or_404(Address, pk=address_id, user=request.user)
+        else:
+            address = Address.objects.filter(user=request.user, is_default=True).first()
+            if address is None:
+                return Response(
+                    {'detail': 'No address provided and no default address is set.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        cart_items = list(
+            CartItem.objects.filter(cart__user=request.user).select_related(
+                'variant__product', 'variant__size', 'variant__color',
+            )
+        )
+        if not cart_items:
+            return Response(
+                {'detail': 'Your cart is empty.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                variant_ids = sorted({item.variant_id for item in cart_items})
+                # Lock every involved variant row, in a fixed (pk) order, so
+                # two concurrent checkouts touching overlapping variants
+                # never deadlock each other.
+                variants = {
+                    variant.id: variant
+                    for variant in ProductVariant.objects.select_for_update()
+                    .select_related('product', 'size', 'color')
+                    .filter(pk__in=variant_ids)
+                    .order_by('pk')
+                }
+
+                # Authoritative availability/stock check, against the
+                # locked, up-to-date rows.
+                for item in cart_items:
+                    variant = variants[item.variant_id]
+                    if not variant.is_active or not variant.product.is_active:
+                        raise _CheckoutError(f'"{variant}" is no longer available.')
+                    if item.quantity > variant.stock_quantity:
+                        raise _CheckoutError(
+                            f'Only {variant.stock_quantity} in stock for "{variant}".'
+                        )
+
+                subtotal = sum(
+                    (variants[item.variant_id].product.price * item.quantity)
+                    for item in cart_items
+                )
+
+                order = Order.objects.create(
+                    user=request.user,
+                    order_number=_generate_order_number(),
+                    status=Order.Status.PENDING,
+                    shipping_full_name=address.full_name,
+                    shipping_phone=address.phone,
+                    shipping_address_line1=address.address_line1,
+                    shipping_address_line2=address.address_line2,
+                    shipping_city=address.city,
+                    shipping_state=address.state,
+                    shipping_postal_code=address.postal_code,
+                    shipping_country=address.country,
+                    subtotal=subtotal,
+                    total_amount=subtotal,
+                )
+
+                for item in cart_items:
+                    variant = variants[item.variant_id]
+                    # Atomic conditional decrement: the WHERE clause is
+                    # evaluated by the database as part of this single
+                    # UPDATE, so it's race-safe even without the lock above.
+                    updated = ProductVariant.objects.filter(
+                        pk=variant.pk, stock_quantity__gte=item.quantity,
+                    ).update(stock_quantity=F('stock_quantity') - item.quantity)
+                    if not updated:
+                        raise _CheckoutError(
+                            f'Only {variant.stock_quantity} in stock for "{variant}".'
+                        )
+
+                    OrderItem.objects.create(
+                        order=order,
+                        variant=variant,
+                        quantity=item.quantity,
+                        unit_price=variant.product.price,
+                    )
+
+                CartItem.objects.filter(cart__user=request.user).delete()
+        except _CheckoutError as exc:
+            return Response({'detail': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
