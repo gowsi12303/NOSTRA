@@ -23,6 +23,7 @@ from .models import (
     Category,
     Order,
     OrderItem,
+    Payment,
     Product,
     ProductColor,
     ProductImage,
@@ -2455,3 +2456,187 @@ class OrderPlaceAPITests(APITestCase):
         detail_response = self.client.get(f'/api/products/orders/{order_id}/')
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['id'], order_id)
+
+
+class PaymentCreateAPITests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='paymentuser',
+            email='paymentuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherpaymentuser',
+            email='otherpaymentuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.order = self._create_order(self.user, 'ORD-PAY-0001', '75.00')
+        self.other_order = self._create_order(self.other_user, 'ORD-PAY-0002', '40.00')
+
+    def _create_order(self, user, order_number, total_amount):
+        return Order.objects.create(
+            user=user,
+            order_number=order_number,
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal=total_amount,
+            total_amount=total_amount,
+        )
+
+    def pay_url(self, order_id):
+        return f'/api/products/orders/{order_id}/pay/'
+
+    def pay(self, order_id, data=None, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.post(self.pay_url(order_id), data or {'provider': 'manual'}, format='json')
+
+    def test_authenticated_user_can_create_payment(self):
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Payment.objects.count(), 1)
+        self.assertEqual(response.data['order'], self.order.id)
+        self.assertEqual(response.data['provider'], 'manual')
+
+    def test_unauthenticated_request_is_rejected(self):
+        response = self.client.post(self.pay_url(self.order.id), {'provider': 'manual'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    def test_another_users_order_returns_404(self):
+        response = self.pay(self.other_order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    def test_amount_is_taken_from_order_total_amount(self):
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        payment = Payment.objects.get()
+        self.assertEqual(payment.amount, Decimal('75.00'))
+        self.order.refresh_from_db()
+        self.assertEqual(Decimal(response.data['amount']), self.order.total_amount)
+
+    def test_client_cannot_override_amount(self):
+        response = self.pay(self.order.id, {'provider': 'manual', 'amount': '0.01'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get()
+        self.assertEqual(payment.amount, Decimal('75.00'))
+
+    def test_client_cannot_override_status(self):
+        response = self.pay(
+            self.order.id, {'provider': 'manual', 'status': Payment.Status.PAID}, user=self.user,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_client_cannot_override_currency(self):
+        response = self.pay(self.order.id, {'provider': 'manual', 'currency': 'USD'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get()
+        self.assertEqual(payment.currency, 'INR')
+
+    def test_client_cannot_override_provider_reference(self):
+        response = self.pay(
+            self.order.id, {'provider': 'manual', 'provider_reference': 'FAKE-REF'}, user=self.user,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get()
+        self.assertIsNone(payment.provider_reference)
+
+    def test_client_cannot_override_order(self):
+        response = self.pay(
+            self.order.id, {'provider': 'manual', 'order': self.other_order.id}, user=self.user,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get()
+        self.assertEqual(payment.order, self.order)
+
+    def test_client_cannot_override_raw_response(self):
+        response = self.pay(
+            self.order.id, {'provider': 'manual', 'raw_response': {'hacked': True}}, user=self.user,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get()
+        self.assertIsNone(payment.raw_response)
+
+    def test_invalid_provider_is_rejected(self):
+        response = self.pay(self.order.id, {'provider': 'not-a-real-gateway'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    def test_paid_order_cannot_create_another_payment(self):
+        Payment.objects.create(
+            order=self.order,
+            provider='manual',
+            amount=self.order.total_amount,
+            status=Payment.Status.PAID,
+        )
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Payment.objects.count(), 1)
+
+    def test_failed_payment_allows_new_payment_attempt(self):
+        Payment.objects.create(
+            order=self.order,
+            provider='manual',
+            amount=self.order.total_amount,
+            status=Payment.Status.FAILED,
+        )
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Payment.objects.filter(order=self.order).count(), 2)
+
+    def test_retry_creates_a_new_payment_row(self):
+        first = Payment.objects.create(
+            order=self.order,
+            provider='manual',
+            amount=self.order.total_amount,
+            status=Payment.Status.CANCELLED,
+        )
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(response.data['id'], first.id)
+        self.assertEqual(Payment.objects.filter(order=self.order).count(), 2)
+
+    def test_newly_created_payment_starts_as_pending(self):
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.data['status'], Payment.Status.PENDING)
+        payment = Payment.objects.get()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_order_status_remains_unchanged(self):
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+        self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+
+    def test_sequential_attempts_each_create_a_separate_pending_payment(self):
+        # Not a timing/threading test — just confirms the locked,
+        # transaction-wrapped check-and-create sequence still behaves
+        # correctly and consistently across repeated calls in a row, and
+        # that the lock is released cleanly between requests (a stuck lock
+        # would hang or fail the second call).
+        first = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        second = self.pay(self.order.id, {'provider': 'razorpay'}, user=self.user)
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(first.data['id'], second.data['id'])
+        self.assertEqual(Payment.objects.filter(order=self.order).count(), 2)
+        self.assertTrue(
+            Payment.objects.filter(order=self.order, status=Payment.Status.PENDING).count() == 2
+        )
+
+    def test_locked_order_lookup_still_scoped_to_request_user(self):
+        # Re-confirms requirement 3 explicitly against the new
+        # select_for_update() queryset: locking must not bypass ownership
+        # scoping. (test_another_users_order_returns_404 already covers
+        # this same guarantee; this pins it down again post-change.)
+        response = self.pay(self.other_order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Payment.objects.count(), 0)

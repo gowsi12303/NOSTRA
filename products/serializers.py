@@ -7,6 +7,7 @@ from .models import (
     Category,
     Order,
     OrderItem,
+    Payment,
     Product,
     ProductColor,
     ProductImage,
@@ -255,3 +256,23 @@ class OrderSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    # Response-only representation: every field here is set by the view
+    # (PaymentCreateView), never accepted as input through this serializer.
+    # provider_reference and raw_response are intentionally excluded from
+    # output — they're internal/gateway bookkeeping, not needed by clients.
+    class Meta:
+        model = Payment
+        fields = [
+            'id',
+            'order',
+            'provider',
+            'amount',
+            'currency',
+            'status',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields

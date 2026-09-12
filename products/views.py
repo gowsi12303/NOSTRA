@@ -18,6 +18,7 @@ from .models import (
     Category,
     Order,
     OrderItem,
+    Payment,
     Product,
     ProductVariant,
     WishlistItem,
@@ -29,6 +30,7 @@ from .serializers import (
     CartSerializer,
     CategorySerializer,
     OrderSerializer,
+    PaymentSerializer,
     ProductSerializer,
     WishlistItemSerializer,
 )
@@ -446,3 +448,60 @@ class OrderPlaceView(generics.GenericAPIView):
             return Response({'detail': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+
+
+# --- Payment (create only) ----------------------------------------------
+
+# No real gateway is integrated yet — these are just the provider values the
+# create-payment endpoint currently accepts for a Payment attempt.
+PAYMENT_PROVIDERS = ('manual', 'razorpay', 'stripe')
+
+
+class CreatePaymentInputSerializer(serializers.Serializer):
+    # Only ever a provider name. amount/currency/status/provider_reference/
+    # raw_response/order are never accepted here — they're always
+    # computed/assigned server-side.
+    provider = serializers.ChoiceField(choices=PAYMENT_PROVIDERS)
+
+
+class PaymentCreateView(generics.GenericAPIView):
+    """Create a new Payment attempt for one of the authenticated user's own
+    orders. The amount is always order.total_amount; the order must already
+    belong to request.user (another user's order 404s); an order that
+    already has a PAID payment cannot start another attempt. Order.status
+    is never touched here — it only changes once a payment is verified as
+    successful, which is not implemented yet."""
+    serializer_class = PaymentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        input_serializer = CreatePaymentInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        provider = input_serializer.validated_data['provider']
+
+        with transaction.atomic():
+            # Lock this order's row for the duration of the check-and-create
+            # sequence, so two concurrent requests for the same order can't
+            # both pass the PAID check before either has written anything.
+            # Still scoped to request.user: another user's order 404s here
+            # exactly as before select_for_update() was added.
+            order = get_object_or_404(
+                Order.objects.select_for_update(),
+                pk=self.kwargs['order_id'],
+                user=request.user,
+            )
+
+            if order.payments.filter(status=Payment.Status.PAID).exists():
+                return Response(
+                    {'detail': 'This order has already been paid for.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            payment = Payment.objects.create(
+                order=order,
+                provider=provider,
+                amount=order.total_amount,
+                status=Payment.Status.PENDING,
+            )
+
+        return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
