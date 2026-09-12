@@ -336,3 +336,42 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f'{self.quantity} x {self.variant} (order #{self.order_id})'
+
+
+class Payment(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        PAID = 'paid', 'Paid'
+        FAILED = 'failed', 'Failed'
+        REFUNDED = 'refunded', 'Refunded'
+        CANCELLED = 'cancelled', 'Cancelled'
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.PROTECT,
+        related_name='payments',
+    )
+    # Gateway-agnostic: which provider ('razorpay', 'stripe', 'manual', ...)
+    # and that provider's own opaque reference for this payment attempt —
+    # never gateway-specific columns, so a provider can be added later
+    # without a schema change. No card numbers, CVV, UPI credentials, or
+    # other sensitive payment data are ever stored here or in raw_response.
+    provider = models.CharField(max_length=32)
+    provider_reference = models.CharField(max_length=128, unique=True, blank=True, null=True)
+
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3, default='INR')
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    raw_response = models.JSONField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Payment for {self.order.order_number} - {self.status}'
