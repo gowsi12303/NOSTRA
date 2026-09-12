@@ -213,6 +213,26 @@ class AddressSerializer(serializers.ModelSerializer):
         ]
 
 
+class PaymentSerializer(serializers.ModelSerializer):
+    # Response-only representation: every field here is set by the view
+    # (PaymentCreateView), never accepted as input through this serializer.
+    # provider_reference and raw_response are intentionally excluded from
+    # output — they're internal/gateway bookkeeping, not needed by clients.
+    class Meta:
+        model = Payment
+        fields = [
+            'id',
+            'order',
+            'provider',
+            'amount',
+            'currency',
+            'status',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
 class OrderItemSerializer(serializers.ModelSerializer):
     # Reuses the same variant-with-product/size/color representation already
     # used for cart line items — a purchased line item needs the same
@@ -235,6 +255,11 @@ class OrderSerializer(serializers.ModelSerializer):
     # the authenticated request's user by the view (not implemented yet),
     # never accepted from client input.
     items = OrderItemSerializer(many=True, read_only=True)
+    # Read-only visibility into payment attempts for this order. Uses the
+    # same PaymentSerializer as PaymentCreateView's response, so
+    # provider_reference/raw_response stay excluded here too — no new
+    # exposure, just visibility into the existing safe fields.
+    payments = PaymentSerializer(many=True, read_only=True)
 
     class Meta:
         model = Order
@@ -253,26 +278,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'subtotal',
             'total_amount',
             'items',
+            'payments',
             'created_at',
             'updated_at',
         ]
-
-
-class PaymentSerializer(serializers.ModelSerializer):
-    # Response-only representation: every field here is set by the view
-    # (PaymentCreateView), never accepted as input through this serializer.
-    # provider_reference and raw_response are intentionally excluded from
-    # output — they're internal/gateway bookkeeping, not needed by clients.
-    class Meta:
-        model = Payment
-        fields = [
-            'id',
-            'order',
-            'provider',
-            'amount',
-            'currency',
-            'status',
-            'created_at',
-            'updated_at',
-        ]
-        read_only_fields = fields

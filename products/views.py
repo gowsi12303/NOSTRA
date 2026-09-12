@@ -282,8 +282,9 @@ class AddressDetailView(generics.RetrieveUpdateDestroyAPIView):
 # --- Order (read-only) ------------------------------------------------
 
 def _user_orders_optimized(user):
-    """A user's orders with items and each item's variant/product/size/color
-    fetched up front to avoid N+1 queries when OrderSerializer nests them."""
+    """A user's orders with items (and each item's variant/product/size/
+    color) and payments fetched up front to avoid N+1 queries when
+    OrderSerializer nests them."""
     return Order.objects.filter(user=user).prefetch_related(
         Prefetch(
             'items',
@@ -291,6 +292,7 @@ def _user_orders_optimized(user):
                 'variant__product', 'variant__size', 'variant__color',
             ),
         ),
+        'payments',
     )
 
 

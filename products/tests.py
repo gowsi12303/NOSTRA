@@ -1932,7 +1932,7 @@ class OrderSerializerTests(APITestCase):
                 'shipping_full_name', 'shipping_phone', 'shipping_address_line1',
                 'shipping_address_line2', 'shipping_city', 'shipping_state',
                 'shipping_postal_code', 'shipping_country',
-                'subtotal', 'total_amount', 'items',
+                'subtotal', 'total_amount', 'items', 'payments',
                 'created_at', 'updated_at',
             },
         )
@@ -2640,3 +2640,102 @@ class PaymentCreateAPITests(APITestCase):
         response = self.pay(self.other_order.id, {'provider': 'manual'}, user=self.user)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(Payment.objects.count(), 0)
+
+
+class OrderPaymentVisibilityAPITests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderpaymentuser',
+            email='orderpaymentuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherorderpaymentuser',
+            email='otherorderpaymentuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.order = self._create_order(self.user, 'ORD-VIS-0001', '60.00')
+        self.other_order = self._create_order(self.other_user, 'ORD-VIS-0002', '30.00')
+
+        self.payment = Payment.objects.create(
+            order=self.order,
+            provider='manual',
+            provider_reference='SECRET-REF-123',
+            amount=self.order.total_amount,
+            status=Payment.Status.PENDING,
+            raw_response={'card_last4': '4242', 'internal': 'sensitive'},
+        )
+
+    def _create_order(self, user, order_number, total_amount):
+        return Order.objects.create(
+            user=user,
+            order_number=order_number,
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal=total_amount,
+            total_amount=total_amount,
+        )
+
+    def test_order_detail_response_includes_payments(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/products/orders/{self.order.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('payments', response.data)
+        self.assertEqual(len(response.data['payments']), 1)
+
+    def test_order_list_response_includes_payments(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get('/api/products/orders/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('payments', response.data[0])
+        self.assertEqual(len(response.data[0]['payments']), 1)
+
+    def test_payment_fields_are_serialized_correctly(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/products/orders/{self.order.id}/')
+        payment_data = response.data['payments'][0]
+
+        self.assertEqual(payment_data['id'], self.payment.id)
+        self.assertEqual(payment_data['order'], self.order.id)
+        self.assertEqual(payment_data['provider'], 'manual')
+        self.assertEqual(Decimal(payment_data['amount']), Decimal('60.00'))
+        self.assertEqual(payment_data['currency'], 'INR')
+        self.assertEqual(payment_data['status'], Payment.Status.PENDING)
+        self.assertIn('created_at', payment_data)
+        self.assertIn('updated_at', payment_data)
+
+    def test_provider_reference_is_not_exposed(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/products/orders/{self.order.id}/')
+        payment_data = response.data['payments'][0]
+        self.assertNotIn('provider_reference', payment_data)
+
+    def test_raw_response_is_not_exposed(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/products/orders/{self.order.id}/')
+        payment_data = response.data['payments'][0]
+        self.assertNotIn('raw_response', payment_data)
+
+    def test_order_with_no_payments_returns_empty_payments_list(self):
+        empty_order = self._create_order(self.user, 'ORD-VIS-0003', '10.00')
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f'/api/products/orders/{empty_order.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['payments'], [])
+
+    def test_another_users_order_and_payments_remain_isolated(self):
+        self.client.force_authenticate(user=self.user)
+
+        # self.user must never be able to reach other_user's order/payment.
+        response = self.client.get(f'/api/products/orders/{self.other_order.id}/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # and self.user's own order must only ever show self.user's own payment.
+        own_response = self.client.get(f'/api/products/orders/{self.order.id}/')
+        payment_ids = [p['id'] for p in own_response.data['payments']]
+        self.assertEqual(payment_ids, [self.payment.id])
