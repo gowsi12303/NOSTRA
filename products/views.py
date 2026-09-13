@@ -7,7 +7,7 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, serializers, status
 from rest_framework.filters import OrderingFilter, SearchFilter
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
 from .filters import ProductFilter
@@ -317,7 +317,7 @@ class OrderDetailView(generics.RetrieveAPIView):
         return _user_orders_optimized(self.request.user)
 
 
-# --- Order status update (dev/test only) --------------------------------
+# --- Order status update (staff/admin only) ------------------------------
 
 # One-way fulfillment state machine: keys are the order's *current*
 # status, values are the set of statuses it may move to next. Anything
@@ -333,15 +333,19 @@ ORDER_STATUS_TRANSITIONS = {
 
 
 class OrderStatusUpdateView(generics.GenericAPIView):
-    """Update an order's status for development/testing. Enforces a
-    one-way fulfillment state machine (ORDER_STATUS_TRANSITIONS) —
-    delivered/cancelled can't be reopened, and every other transition not
-    explicitly listed there is rejected. Does not touch Payment,
-    inventory, cart, or OrderItems — this is order-lifecycle only. No
-    admin-only permission is applied yet; any authenticated owner of the
-    order can call this for now (to be revisited separately)."""
+    """Update an order's status. Enforces a one-way fulfillment state
+    machine (ORDER_STATUS_TRANSITIONS) — delivered/cancelled can't be
+    reopened, and every other transition not explicitly listed there is
+    rejected. Does not touch Payment, inventory, cart, or OrderItems —
+    this is order-lifecycle only.
+
+    Staff/admin only: IsAdminUser rejects unauthenticated requests with
+    401 and authenticated non-staff users with 403. Because only staff
+    can reach this endpoint at all, orders are looked up by order_id
+    alone (not scoped to request.user) — staff must be able to update
+    any customer's order."""
     serializer_class = OrderSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
 
     def patch(self, request, *args, **kwargs):
         input_serializer = OrderStatusUpdateSerializer(data=request.data)
@@ -349,12 +353,12 @@ class OrderStatusUpdateView(generics.GenericAPIView):
         new_status = input_serializer.validated_data['status']
 
         with transaction.atomic():
-            # Scoped to request.user: another user's order 404s here, no
-            # existence leak either way.
+            # Not scoped to request.user: this endpoint is staff/admin
+            # only (enforced by IsAdminUser above), and staff must be able
+            # to update any customer's order, not just their own.
             order = get_object_or_404(
                 Order.objects.select_for_update(),
                 pk=self.kwargs['order_id'],
-                user=request.user,
             )
 
             allowed_next_statuses = ORDER_STATUS_TRANSITIONS.get(order.status, set())
