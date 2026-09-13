@@ -2739,3 +2739,176 @@ class OrderPaymentVisibilityAPITests(APITestCase):
         own_response = self.client.get(f'/api/products/orders/{self.order.id}/')
         payment_ids = [p['id'] for p in own_response.data['payments']]
         self.assertEqual(payment_ids, [self.payment.id])
+
+
+class PaymentStatusUpdateAPITests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='paymentstatususer',
+            email='paymentstatususer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherpaymentstatususer',
+            email='otherpaymentstatususer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.order = self._create_order(self.user, 'ORD-STATUS-0001', '80.00')
+        self.other_order = self._create_order(self.other_user, 'ORD-STATUS-0002', '20.00')
+
+    def _create_order(self, user, order_number, total_amount):
+        return Order.objects.create(
+            user=user,
+            order_number=order_number,
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal=total_amount,
+            total_amount=total_amount,
+        )
+
+    def _create_payment(self, order, status_value, provider='manual'):
+        return Payment.objects.create(
+            order=order,
+            provider=provider,
+            amount=order.total_amount,
+            status=status_value,
+        )
+
+    def status_url(self, order_id, payment_id):
+        return f'/api/products/orders/{order_id}/payments/{payment_id}/status/'
+
+    def patch_status(self, order_id, payment_id, new_status, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.patch(
+            self.status_url(order_id, payment_id), {'status': new_status}, format='json',
+        )
+
+    def test_pending_to_processing_succeeds(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PROCESSING)
+
+    def test_processing_to_paid_succeeds(self):
+        payment = self._create_payment(self.order, Payment.Status.PROCESSING)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PAID)
+
+    def test_pending_to_failed_succeeds(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'failed', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.FAILED)
+
+    def test_pending_to_cancelled_succeeds(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'cancelled', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.CANCELLED)
+
+    def test_paid_to_refunded_succeeds(self):
+        payment = self._create_payment(self.order, Payment.Status.PAID)
+        response = self.patch_status(self.order.id, payment.id, 'refunded', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.REFUNDED)
+
+    def test_invalid_transition_returns_400(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_refunded_is_terminal(self):
+        payment = self._create_payment(self.order, Payment.Status.REFUNDED)
+        response = self.patch_status(self.order.id, payment.id, 'pending', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.REFUNDED)
+
+    def test_failed_is_terminal(self):
+        payment = self._create_payment(self.order, Payment.Status.FAILED)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.FAILED)
+
+    def test_cancelled_is_terminal(self):
+        payment = self._create_payment(self.order, Payment.Status.CANCELLED)
+        response = self.patch_status(self.order.id, payment.id, 'pending', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.CANCELLED)
+
+    def test_invalid_status_value_returns_400(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'not-a-real-status', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_another_users_payment_cannot_be_updated(self):
+        other_payment = self._create_payment(self.other_order, Payment.Status.PENDING)
+        response = self.patch_status(
+            self.other_order.id, other_payment.id, 'processing', user=self.user,
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        other_payment.refresh_from_db()
+        self.assertEqual(other_payment.status, Payment.Status.PENDING)
+
+    def test_payment_from_another_order_cannot_be_updated(self):
+        # self.user's own payment, but referenced via a different order_id
+        # that also belongs to self.user — must still 404.
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        another_own_order = self._create_order(self.user, 'ORD-STATUS-0003', '15.00')
+        response = self.patch_status(another_own_order.id, payment.id, 'processing', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_marking_paid_fails_if_another_payment_already_paid(self):
+        Payment.objects.create(
+            order=self.order,
+            provider='manual',
+            amount=self.order.total_amount,
+            status=Payment.Status.PAID,
+        )
+        second_payment = self._create_payment(self.order, Payment.Status.PROCESSING)
+        response = self.patch_status(self.order.id, second_payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        second_payment.refresh_from_db()
+        self.assertEqual(second_payment.status, Payment.Status.PROCESSING)
+
+    def test_successful_update_returns_updated_payment_fields(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        self.assertEqual(response.data['id'], payment.id)
+        self.assertEqual(response.data['order'], self.order.id)
+        self.assertEqual(response.data['status'], Payment.Status.PROCESSING)
+        self.assertNotIn('provider_reference', response.data)
+        self.assertNotIn('raw_response', response.data)
+
+    def test_unauthenticated_request_is_rejected(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.client.patch(
+            self.status_url(self.order.id, payment.id), {'status': 'processing'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_order_status_remains_unchanged_after_marking_paid(self):
+        payment = self._create_payment(self.order, Payment.Status.PROCESSING)
+        self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)

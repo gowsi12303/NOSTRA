@@ -31,6 +31,7 @@ from .serializers import (
     CategorySerializer,
     OrderSerializer,
     PaymentSerializer,
+    PaymentStatusUpdateSerializer,
     ProductSerializer,
     WishlistItemSerializer,
 )
@@ -507,3 +508,83 @@ class PaymentCreateView(generics.GenericAPIView):
             )
 
         return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
+
+
+# --- Payment status update (dev/test only — NOT a real gateway webhook) --
+
+# One-way state machine: keys are the payment's *current* status, values
+# are the set of statuses it may move to next. Anything not listed here
+# (an omitted current status, or a target not in the set) is rejected.
+# paid/failed/cancelled/refunded are terminal except paid -> refunded.
+PAYMENT_STATUS_TRANSITIONS = {
+    Payment.Status.PENDING: {
+        Payment.Status.PROCESSING,
+        Payment.Status.FAILED,
+        Payment.Status.CANCELLED,
+    },
+    Payment.Status.PROCESSING: {
+        Payment.Status.PAID,
+        Payment.Status.FAILED,
+        Payment.Status.CANCELLED,
+    },
+    Payment.Status.PAID: {Payment.Status.REFUNDED},
+    Payment.Status.FAILED: set(),
+    Payment.Status.CANCELLED: set(),
+    Payment.Status.REFUNDED: set(),
+}
+
+
+class PaymentStatusUpdateView(generics.GenericAPIView):
+    """Update a payment's status for development/testing only — this is
+    NOT a real Razorpay/Stripe webhook, and no gateway is integrated here.
+    Enforces the same one-way state machine a real provider callback would
+    need to: only the transitions in PAYMENT_STATUS_TRANSITIONS are
+    allowed, paid/failed/cancelled/refunded can't be reopened (except
+    paid -> refunded), and an order is never allowed a second paid
+    payment. Order.status is never touched here."""
+    serializer_class = PaymentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, *args, **kwargs):
+        input_serializer = PaymentStatusUpdateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        new_status = input_serializer.validated_data['status']
+
+        with transaction.atomic():
+            # Scoped to both the URL's order_id and request.user in one
+            # query: a payment belonging to another user, or to a
+            # different order than the one in the URL, both 404 here —
+            # no existence leak either way.
+            payment = get_object_or_404(
+                Payment.objects.select_for_update().select_related('order'),
+                pk=self.kwargs['payment_id'],
+                order__pk=self.kwargs['order_id'],
+                order__user=request.user,
+            )
+
+            allowed_next_statuses = PAYMENT_STATUS_TRANSITIONS.get(payment.status, set())
+            if new_status not in allowed_next_statuses:
+                return Response(
+                    {
+                        'detail': (
+                            f'Cannot transition payment from "{payment.status}" '
+                            f'to "{new_status}".'
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if new_status == Payment.Status.PAID:
+                already_has_paid_payment = payment.order.payments.filter(
+                    status=Payment.Status.PAID,
+                ).exclude(pk=payment.pk).exists()
+                if already_has_paid_payment:
+                    return Response(
+                        {'detail': 'This order already has another paid payment.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            payment.status = new_status
+            payment.save(update_fields=['status', 'updated_at'])
+
+        return Response(PaymentSerializer(payment).data, status=status.HTTP_200_OK)

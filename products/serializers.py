@@ -233,6 +233,15 @@ class PaymentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class PaymentStatusUpdateSerializer(serializers.Serializer):
+    # Only ever a target status value. Whether that specific transition is
+    # actually allowed from the payment's current status is validated by
+    # the view (PaymentStatusUpdateView), not here — this serializer only
+    # guards against a value that isn't one of Payment's defined statuses
+    # at all.
+    status = serializers.ChoiceField(choices=Payment.Status.choices)
+
+
 class OrderItemSerializer(serializers.ModelSerializer):
     # Reuses the same variant-with-product/size/color representation already
     # used for cart line items — a purchased line item needs the same
