@@ -291,3 +291,11 @@ class OrderSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+
+class OrderStatusUpdateSerializer(serializers.Serializer):
+    # Only ever a target status value, restricted to Order's own defined
+    # statuses — no new statuses are introduced here. Whether that specific
+    # transition is allowed from the order's current status is validated
+    # by the view (OrderStatusUpdateView), not here.
+    status = serializers.ChoiceField(choices=Order.Status.choices)

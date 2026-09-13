@@ -11,6 +11,7 @@ from .views import (
     OrderDetailView,
     OrderListView,
     OrderPlaceView,
+    OrderStatusUpdateView,
     PaymentCreateView,
     PaymentStatusUpdateView,
     ProductDetailView,
@@ -38,6 +39,7 @@ urlpatterns = [
         PaymentStatusUpdateView.as_view(),
         name='payment-status-update',
     ),
+    path('orders/<int:order_id>/status/', OrderStatusUpdateView.as_view(), name='order-status-update'),
     path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]

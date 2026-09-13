@@ -2912,3 +2912,167 @@ class PaymentStatusUpdateAPITests(APITestCase):
         self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PENDING)
+
+
+class OrderStatusUpdateAPITests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='orderstatususer',
+            email='orderstatususer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherorderstatususer',
+            email='otherorderstatususer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            stock_quantity=10,
+        )
+
+    def _create_order(self, user, order_number, order_status, total_amount='50.00'):
+        return Order.objects.create(
+            user=user,
+            order_number=order_number,
+            status=order_status,
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal=total_amount,
+            total_amount=total_amount,
+        )
+
+    def status_url(self, order_id):
+        return f'/api/products/orders/{order_id}/status/'
+
+    def patch_status(self, order_id, new_status, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.patch(self.status_url(order_id), {'status': new_status}, format='json')
+
+    def test_pending_to_confirmed_succeeds(self):
+        order = self._create_order(self.user, 'ORD-OS-0001', Order.Status.PENDING)
+        response = self.patch_status(order.id, 'confirmed', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
+
+    def test_pending_to_cancelled_succeeds(self):
+        order = self._create_order(self.user, 'ORD-OS-0002', Order.Status.PENDING)
+        response = self.patch_status(order.id, 'cancelled', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+
+    def test_confirmed_to_shipped_succeeds(self):
+        # Order.Status has no 'processing' value (that's a Payment.Status
+        # concept) — the fulfillment chain goes confirmed -> shipped
+        # directly.
+        order = self._create_order(self.user, 'ORD-OS-0003', Order.Status.CONFIRMED)
+        response = self.patch_status(order.id, 'shipped', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.SHIPPED)
+
+    def test_confirmed_to_cancelled_succeeds(self):
+        order = self._create_order(self.user, 'ORD-OS-0004', Order.Status.CONFIRMED)
+        response = self.patch_status(order.id, 'cancelled', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+
+    def test_shipped_to_delivered_succeeds(self):
+        order = self._create_order(self.user, 'ORD-OS-0005', Order.Status.SHIPPED)
+        response = self.patch_status(order.id, 'delivered', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DELIVERED)
+
+    def test_delivered_is_terminal(self):
+        order = self._create_order(self.user, 'ORD-OS-0006', Order.Status.DELIVERED)
+        response = self.patch_status(order.id, 'cancelled', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DELIVERED)
+
+    def test_cancelled_is_terminal(self):
+        order = self._create_order(self.user, 'ORD-OS-0007', Order.Status.CANCELLED)
+        response = self.patch_status(order.id, 'pending', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+
+    def test_invalid_transition_returns_400(self):
+        order = self._create_order(self.user, 'ORD-OS-0008', Order.Status.PENDING)
+        response = self.patch_status(order.id, 'shipped', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+
+    def test_invalid_status_value_returns_400(self):
+        order = self._create_order(self.user, 'ORD-OS-0009', Order.Status.PENDING)
+        response = self.patch_status(order.id, 'not-a-real-status', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+
+    def test_another_users_order_cannot_be_updated(self):
+        other_order = self._create_order(self.other_user, 'ORD-OS-0010', Order.Status.PENDING)
+        response = self.patch_status(other_order.id, 'confirmed', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        other_order.refresh_from_db()
+        self.assertEqual(other_order.status, Order.Status.PENDING)
+
+    def test_unauthenticated_request_is_rejected(self):
+        order = self._create_order(self.user, 'ORD-OS-0011', Order.Status.PENDING)
+        response = self.client.patch(
+            self.status_url(order.id), {'status': 'confirmed'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+
+    def test_successful_update_returns_updated_order_fields(self):
+        order = self._create_order(self.user, 'ORD-OS-0012', Order.Status.PENDING)
+        response = self.patch_status(order.id, 'confirmed', user=self.user)
+        self.assertEqual(response.data['id'], order.id)
+        self.assertEqual(response.data['order_number'], 'ORD-OS-0012')
+        self.assertEqual(response.data['status'], Order.Status.CONFIRMED)
+
+    def test_order_serializer_still_includes_items_and_payments(self):
+        order = self._create_order(self.user, 'ORD-OS-0013', Order.Status.PENDING)
+        OrderItem.objects.create(
+            order=order, variant=self.variant, quantity=1, unit_price='25.00',
+        )
+        Payment.objects.create(
+            order=order, provider='manual', amount=order.total_amount, status=Payment.Status.PENDING,
+        )
+
+        response = self.patch_status(order.id, 'confirmed', user=self.user)
+        self.assertIn('items', response.data)
+        self.assertIn('payments', response.data)
+        self.assertEqual(len(response.data['items']), 1)
+        self.assertEqual(len(response.data['payments']), 1)
+
+    def test_payment_status_remains_unchanged_after_order_status_update(self):
+        order = self._create_order(self.user, 'ORD-OS-0014', Order.Status.PENDING)
+        payment = Payment.objects.create(
+            order=order, provider='manual', amount=order.total_amount, status=Payment.Status.PENDING,
+        )
+        self.patch_status(order.id, 'confirmed', user=self.user)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)

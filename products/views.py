@@ -30,6 +30,7 @@ from .serializers import (
     CartSerializer,
     CategorySerializer,
     OrderSerializer,
+    OrderStatusUpdateSerializer,
     PaymentSerializer,
     PaymentStatusUpdateSerializer,
     ProductSerializer,
@@ -314,6 +315,64 @@ class OrderDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return _user_orders_optimized(self.request.user)
+
+
+# --- Order status update (dev/test only) --------------------------------
+
+# One-way fulfillment state machine: keys are the order's *current*
+# status, values are the set of statuses it may move to next. Anything
+# not listed (an omitted current status, or a target not in the set) is
+# rejected. delivered/cancelled are terminal.
+ORDER_STATUS_TRANSITIONS = {
+    Order.Status.PENDING: {Order.Status.CONFIRMED, Order.Status.CANCELLED},
+    Order.Status.CONFIRMED: {Order.Status.SHIPPED, Order.Status.CANCELLED},
+    Order.Status.SHIPPED: {Order.Status.DELIVERED},
+    Order.Status.DELIVERED: set(),
+    Order.Status.CANCELLED: set(),
+}
+
+
+class OrderStatusUpdateView(generics.GenericAPIView):
+    """Update an order's status for development/testing. Enforces a
+    one-way fulfillment state machine (ORDER_STATUS_TRANSITIONS) —
+    delivered/cancelled can't be reopened, and every other transition not
+    explicitly listed there is rejected. Does not touch Payment,
+    inventory, cart, or OrderItems — this is order-lifecycle only. No
+    admin-only permission is applied yet; any authenticated owner of the
+    order can call this for now (to be revisited separately)."""
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, *args, **kwargs):
+        input_serializer = OrderStatusUpdateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        new_status = input_serializer.validated_data['status']
+
+        with transaction.atomic():
+            # Scoped to request.user: another user's order 404s here, no
+            # existence leak either way.
+            order = get_object_or_404(
+                Order.objects.select_for_update(),
+                pk=self.kwargs['order_id'],
+                user=request.user,
+            )
+
+            allowed_next_statuses = ORDER_STATUS_TRANSITIONS.get(order.status, set())
+            if new_status not in allowed_next_statuses:
+                return Response(
+                    {
+                        'detail': (
+                            f'Cannot transition order from "{order.status}" '
+                            f'to "{new_status}".'
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            order.status = new_status
+            order.save(update_fields=['status', 'updated_at'])
+
+        return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
 
 
 # --- Place Order --------------------------------------------------------
