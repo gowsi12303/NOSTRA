@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     Category,
+    Payment,
     Product,
     ProductColor,
     ProductImage,
@@ -76,3 +77,15 @@ class ProductVariantAdmin(admin.ModelAdmin):
     list_display = ('product', 'size', 'color', 'sku', 'stock_quantity', 'is_active')
     list_filter = ('is_active',)
     search_fields = ('product__name', 'sku')
+
+
+@admin.register(Payment)
+class PaymentAdmin(admin.ModelAdmin):
+    # raw_response is deliberately left out of list_display (it's a
+    # potentially large JSON blob, not useful in a list row) but is not
+    # excluded/restricted for the change (detail) view — along with
+    # provider_reference, both remain visible there via the default
+    # change-form field set, since no `fields`/`exclude` is set here.
+    list_display = ('id', 'order', 'provider', 'amount', 'currency', 'status', 'created_at')
+    list_filter = ('provider', 'status', 'currency')
+    search_fields = ('order__order_number', 'provider_reference')
