@@ -2473,10 +2473,11 @@ class PaymentCreateAPITests(APITestCase):
         self.order = self._create_order(self.user, 'ORD-PAY-0001', '75.00')
         self.other_order = self._create_order(self.other_user, 'ORD-PAY-0002', '40.00')
 
-    def _create_order(self, user, order_number, total_amount):
+    def _create_order(self, user, order_number, total_amount, order_status=Order.Status.PENDING):
         return Order.objects.create(
             user=user,
             order_number=order_number,
+            status=order_status,
             shipping_full_name='Jane Doe',
             shipping_phone='9876543210',
             shipping_address_line1='123 Main St',
@@ -2640,6 +2641,40 @@ class PaymentCreateAPITests(APITestCase):
         response = self.pay(self.other_order.id, {'provider': 'manual'}, user=self.user)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(Payment.objects.count(), 0)
+
+    # --- Step 94: payment eligibility by order status -----------------------
+
+    def test_cancelled_order_cannot_create_payment(self):
+        order = self._create_order(
+            self.user, 'ORD-PAY-0003', '25.00', order_status=Order.Status.CANCELLED,
+        )
+        response = self.pay(order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 0)
+
+    def test_delivered_order_cannot_create_payment(self):
+        order = self._create_order(
+            self.user, 'ORD-PAY-0004', '25.00', order_status=Order.Status.DELIVERED,
+        )
+        response = self.pay(order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 0)
+
+    def test_confirmed_order_can_create_payment(self):
+        order = self._create_order(
+            self.user, 'ORD-PAY-0005', '25.00', order_status=Order.Status.CONFIRMED,
+        )
+        response = self.pay(order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 1)
+
+    def test_shipped_order_can_create_payment(self):
+        order = self._create_order(
+            self.user, 'ORD-PAY-0006', '25.00', order_status=Order.Status.SHIPPED,
+        )
+        response = self.pay(order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 1)
 
 
 class OrderPaymentVisibilityAPITests(APITestCase):

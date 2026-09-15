@@ -565,13 +565,27 @@ class CreatePaymentInputSerializer(serializers.Serializer):
     provider = serializers.ChoiceField(choices=PAYMENT_PROVIDERS)
 
 
+# Orders in these statuses can no longer accept a new payment attempt.
+# Reuses ORDER_STATUS_TRANSITIONS's own terminal/non-terminal split as the
+# rule (delivered/cancelled are exactly the two statuses with no allowed
+# next transition) rather than a separate list, so it can't drift out of
+# sync with the order lifecycle defined there.
+ORDER_STATUSES_INELIGIBLE_FOR_PAYMENT = {
+    order_status
+    for order_status, allowed_next_statuses in ORDER_STATUS_TRANSITIONS.items()
+    if not allowed_next_statuses
+}
+
+
 class PaymentCreateView(generics.GenericAPIView):
     """Create a new Payment attempt for one of the authenticated user's own
     orders. The amount is always order.total_amount; the order must already
-    belong to request.user (another user's order 404s); an order that
-    already has a PAID payment cannot start another attempt. Order.status
-    is never touched here — it only changes once a payment is verified as
-    successful, which is not implemented yet."""
+    belong to request.user (another user's order 404s); an order that's
+    already delivered or cancelled (see ORDER_STATUSES_INELIGIBLE_FOR_PAYMENT)
+    can't start a new attempt at all, and one that already has a PAID
+    payment can't start another either. Order.status is only ever changed
+    as a side effect of a payment reaching paid (see
+    _confirm_order_after_payment) — never here."""
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated]
 
@@ -583,7 +597,7 @@ class PaymentCreateView(generics.GenericAPIView):
         with transaction.atomic():
             # Lock this order's row for the duration of the check-and-create
             # sequence, so two concurrent requests for the same order can't
-            # both pass the PAID check before either has written anything.
+            # both pass the checks below before either has written anything.
             # Still scoped to request.user: another user's order 404s here
             # exactly as before select_for_update() was added.
             order = get_object_or_404(
@@ -591,6 +605,12 @@ class PaymentCreateView(generics.GenericAPIView):
                 pk=self.kwargs['order_id'],
                 user=request.user,
             )
+
+            if order.status in ORDER_STATUSES_INELIGIBLE_FOR_PAYMENT:
+                return Response(
+                    {'detail': f'Cannot create a payment for an order with status "{order.status}".'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             if order.payments.filter(status=Payment.Status.PAID).exists():
                 return Response(
