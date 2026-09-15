@@ -1,7 +1,7 @@
 import uuid
 
 from django.db import transaction
-from django.db.models import F, Prefetch
+from django.db.models import F, Prefetch, ProtectedError
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -10,7 +10,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
-from .filters import OrderFilter, ProductFilter
+from .filters import AdminProductFilter, OrderFilter, ProductFilter
 from .models import (
     Address,
     Cart,
@@ -26,6 +26,7 @@ from .models import (
 from .pagination import ProductPagination
 from .serializers import (
     AddressSerializer,
+    AdminProductSerializer,
     CartItemSerializer,
     CartSerializer,
     CategorySerializer,
@@ -38,15 +39,23 @@ from .serializers import (
 )
 
 
-def _active_products_optimized():
-    """Active products with related data fetched up front to avoid N+1 queries
-    when ProductSerializer nests category/images/sizes/colors/variants."""
-    return Product.objects.filter(is_active=True).select_related('category').prefetch_related(
+def _products_optimized():
+    """Products with related data fetched up front to avoid N+1 queries
+    when ProductSerializer/AdminProductSerializer nest category/images/
+    sizes/colors/variants. Shared base for both the public (active-only)
+    and staff/admin (all products) product querysets."""
+    return Product.objects.select_related('category').prefetch_related(
         'images',
         'sizes',
         'colors',
         Prefetch('variants', queryset=ProductVariant.objects.select_related('size', 'color')),
     )
+
+
+def _active_products_optimized():
+    """Active products only — used by the public ProductListView/
+    ProductDetailView."""
+    return _products_optimized().filter(is_active=True)
 
 
 class ProductListView(generics.ListAPIView):
@@ -68,6 +77,57 @@ class ProductDetailView(generics.RetrieveAPIView):
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
     queryset = _active_products_optimized()
+
+
+# --- Product management (staff/admin only) --------------------------------
+# Distinct from ProductListView/ProductDetailView above, which stay public,
+# read-only, and scoped to active products only — nothing here changes that
+# existing customer-facing behavior.
+
+class AdminProductListCreateView(generics.ListCreateAPIView):
+    """Staff/admin-only: list every product (including inactive ones) and
+    create new products. Uses AdminProductSerializer, not the public
+    ProductSerializer — category is a writable PK reference here, not a
+    nested read-only representation."""
+    serializer_class = AdminProductSerializer
+    permission_classes = [IsAdminUser]
+    queryset = _products_optimized().order_by('-created_at')
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+    filterset_class = AdminProductFilter
+    search_fields = ['name', 'description']
+    ordering_fields = ['created_at', 'name', 'price']
+    pagination_class = ProductPagination
+
+
+class AdminProductDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Staff/admin-only: retrieve, partially update, or delete a single
+    product (including inactive ones). Hard deletion is blocked — with a
+    400, not a 500 — when the product (or one of its variants) is still
+    referenced by a protected relation (a wishlisted product, or one with
+    any OrderItem history via its variants); deactivating the product
+    (PATCH is_active=false) is the safe alternative in that case."""
+    serializer_class = AdminProductSerializer
+    permission_classes = [IsAdminUser]
+    queryset = _products_optimized()
+    http_method_names = ['get', 'patch', 'delete']
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError:
+            raise serializers.ValidationError(
+                {
+                    'detail': (
+                        'This product cannot be deleted because it has related '
+                        'records (e.g. orders or wishlist entries). Deactivate '
+                        'it instead by setting is_active to false.'
+                    ),
+                },
+            )
 
 
 class CategoryListView(generics.ListAPIView):

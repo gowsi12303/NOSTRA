@@ -111,6 +111,43 @@ class ProductSerializer(serializers.ModelSerializer):
         ]
 
 
+class AdminProductSerializer(serializers.ModelSerializer):
+    """Staff-only product management serializer (AdminProductListCreateView/
+    AdminProductDetailView) — deliberately separate from the public,
+    fully-read-only ProductSerializer rather than modifying it.
+
+    Unlike ProductSerializer, `category` is left as DRF's default
+    auto-generated field for a ModelSerializer FK: a plain writable
+    PrimaryKeyRelatedField, not the nested read-only CategorySerializer —
+    so staff can set a product's category by id. images/sizes/colors/
+    variants stay read-only nested views (reusing the same serializers
+    ProductSerializer uses) for visibility only; creating/editing those
+    sub-resources isn't in scope here, they remain Django-admin-only.
+    id/created_at/updated_at are server-managed and read-only."""
+    images = ProductImageSerializer(many=True, read_only=True)
+    sizes = ProductSizeSerializer(many=True, read_only=True)
+    colors = ProductColorSerializer(many=True, read_only=True)
+    variants = ProductVariantSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Product
+        fields = [
+            'id',
+            'name',
+            'description',
+            'price',
+            'category',
+            'images',
+            'sizes',
+            'colors',
+            'variants',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
 class ProductSummarySerializer(serializers.ModelSerializer):
     """Minimal, read-only product information needed to display a cart line item."""
 

@@ -3712,3 +3712,269 @@ class OrderListAdminAPITests(APITestCase):
         self.assertEqual(len(result['payments']), 1)
         self.assertEqual(result['items'][0]['quantity'], 2)
         self.assertEqual(result['payments'][0]['status'], Payment.Status.PENDING)
+
+
+class AdminProductAPITests(APITestCase):
+    """/api/products/admin/products/ and /api/products/admin/products/<pk>/
+    — staff-only product management (Step 115)."""
+
+    list_url = '/api/products/admin/products/'
+
+    def detail_url(self, pk):
+        return f'/api/products/admin/products/{pk}/'
+
+    def setUp(self):
+        self.staff_user = User.objects.create_user(
+            username='adminproductstaff',
+            email='adminproductstaff@nostra.com',
+            password='OrderPass@2026!',
+            is_staff=True,
+        )
+        self.customer = User.objects.create_user(
+            username='adminproductcustomer',
+            email='adminproductcustomer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.other_category = Category.objects.create(name='Footwear')
+        self.active_product = Product.objects.create(
+            name='Active Shirt',
+            description='An active shirt',
+            price='25.00',
+            category=self.category,
+            is_active=True,
+        )
+        self.inactive_product = Product.objects.create(
+            name='Inactive Shirt',
+            description='An inactive shirt',
+            price='30.00',
+            category=self.category,
+            is_active=False,
+        )
+
+    def valid_payload(self, **overrides):
+        payload = {
+            'name': 'New Product',
+            'description': 'A brand new product',
+            'price': '19.99',
+            'category': self.category.id,
+            'is_active': True,
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Authentication / authorization -------------------------------
+
+    def test_unauthenticated_list_returns_401(self):
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_unauthenticated_detail_returns_401(self):
+        response = self.client.get(self.detail_url(self.active_product.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_normal_customer_list_returns_403(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_normal_customer_detail_returns_403(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get(self.detail_url(self.active_product.id))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- List / retrieve -------------------------------------------------
+
+    def test_admin_can_list_products(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {item['name'] for item in response.data['results']}
+        self.assertIn('Active Shirt', names)
+
+    def test_inactive_products_are_visible_to_admin(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        results_by_name = {item['name']: item for item in response.data['results']}
+        self.assertIn('Inactive Shirt', results_by_name)
+        self.assertFalse(results_by_name['Inactive Shirt']['is_active'])
+
+    def test_admin_can_retrieve_product(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.detail_url(self.active_product.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.active_product.id)
+        self.assertEqual(response.data['name'], 'Active Shirt')
+        self.assertIn('images', response.data)
+        self.assertIn('sizes', response.data)
+        self.assertIn('colors', response.data)
+        self.assertIn('variants', response.data)
+
+    # --- Create ------------------------------------------------------------
+
+    def test_admin_can_create_product(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(self.list_url, self.valid_payload(), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Product.objects.filter(name='New Product').exists())
+        self.assertEqual(response.data['category'], self.category.id)
+
+    def test_create_validation_failure_missing_required_fields(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(self.list_url, {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+        self.assertIn('price', response.data)
+        self.assertIn('category', response.data)
+
+    def test_client_cannot_set_server_managed_fields_on_create(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(
+            self.list_url,
+            self.valid_payload(id=99999),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(response.data['id'], 99999)
+
+    # --- Update ------------------------------------------------------------
+
+    def test_admin_can_partially_update_product(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.active_product.id), {'price': '99.99'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.active_product.refresh_from_db()
+        self.assertEqual(self.active_product.price, Decimal('99.99'))
+
+    def test_partial_update_validation_failure(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.active_product.id), {'price': 'not-a-number'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_client_cannot_override_server_managed_fields_on_update(self):
+        self.client.force_authenticate(user=self.staff_user)
+        original_created_at = self.active_product.created_at
+        response = self.client.patch(
+            self.detail_url(self.active_product.id),
+            {'created_at': '2000-01-01T00:00:00Z'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.active_product.refresh_from_db()
+        self.assertEqual(self.active_product.created_at, original_created_at)
+
+    # --- Delete --------------------------------------------------------
+
+    def test_admin_can_delete_product_safely(self):
+        product = Product.objects.create(
+            name='Deletable Product',
+            description='No related records',
+            price='5.00',
+            category=self.category,
+        )
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.delete(self.detail_url(product.id))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Product.objects.filter(pk=product.id).exists())
+
+    def test_delete_blocked_when_product_is_wishlisted(self):
+        WishlistItem.objects.create(user=self.customer, product=self.active_product)
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.delete(self.detail_url(self.active_product.id))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Product.objects.filter(pk=self.active_product.id).exists())
+
+    def test_delete_blocked_when_product_has_ordered_variant(self):
+        size = ProductSize.objects.create(product=self.active_product, size='M')
+        variant = ProductVariant.objects.create(
+            product=self.active_product, size=size, stock_quantity=5,
+        )
+        order = Order.objects.create(
+            user=self.customer,
+            order_number='ORD-ADMPROD-0001',
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal='25.00',
+            total_amount='25.00',
+        )
+        OrderItem.objects.create(order=order, variant=variant, quantity=1, unit_price='25.00')
+
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.delete(self.detail_url(self.active_product.id))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Product.objects.filter(pk=self.active_product.id).exists())
+
+    # --- Filtering / search / ordering / pagination -------------------
+
+    def test_category_filter(self):
+        Product.objects.create(
+            name='Shoe', description='A shoe', price='40.00',
+            category=self.other_category, is_active=True,
+        )
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'category': self.other_category.id})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Shoe'})
+
+    def test_is_active_filter(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'is_active': 'false'})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Inactive Shirt'})
+
+    def test_search_by_name(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'search': 'Inactive'})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Inactive Shirt'})
+
+    def test_search_by_description(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'search': 'active shirt'})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Active Shirt', 'Inactive Shirt'})
+
+    def test_ordering_by_price(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'ordering': 'price'})
+        prices = [float(item['price']) for item in response.data['results']]
+        self.assertEqual(prices, sorted(prices))
+
+    def test_pagination_default_page_size(self):
+        for i in range(15):
+            Product.objects.create(
+                name=f'Bulk Product {i:03d}', description='bulk', price='10.00',
+                category=self.category, is_active=True,
+            )
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['results']), 12)
+        self.assertIsNotNone(response.data['next'])
+
+    # --- Regression: public Product API must remain unaffected -------
+
+    def test_public_product_list_still_excludes_inactive_products(self):
+        response = self.client.get('/api/products/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {item['name'] for item in response.data['results']}
+        self.assertIn('Active Shirt', names)
+        self.assertNotIn('Inactive Shirt', names)
+
+    def test_public_product_detail_still_404s_for_inactive_product(self):
+        response = self.client.get(f'/api/products/{self.inactive_product.id}/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_product_detail_still_works_for_active_product(self):
+        response = self.client.get(f'/api/products/{self.active_product.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.active_product.id)

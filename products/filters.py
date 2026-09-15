@@ -35,3 +35,12 @@ class OrderFilter(django_filters.FilterSet):
     class Meta:
         model = Order
         fields = ['status', 'user', 'created_after', 'created_before']
+
+
+class AdminProductFilter(django_filters.FilterSet):
+    """Used by the staff-only AdminProductListCreateView. Plain equality
+    filters — unlike ProductFilter, is_active is exposed here since the
+    admin list deliberately includes inactive products too."""
+    class Meta:
+        model = Product
+        fields = ['category', 'is_active']
