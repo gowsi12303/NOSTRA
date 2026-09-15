@@ -269,3 +269,62 @@ class CustomerListAdminAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data['results']), 12)
         self.assertIsNotNone(response.data['next'])
+
+
+class CustomerDetailAdminAPITests(APITestCase):
+    """GET /api/accounts/admin/customers/<pk>/ — staff-only single
+    customer retrieval (Step 124)."""
+
+    def detail_url(self, pk):
+        return f'/api/accounts/admin/customers/{pk}/'
+
+    def setUp(self):
+        self.staff_user = User.objects.create_user(
+            username='customerdetailstaff',
+            email='customerdetailstaff@nostra.com',
+            password='NostraTest@2026!',
+            is_staff=True,
+        )
+        self.customer = User.objects.create_user(
+            username='carolcustomer',
+            email='carol@nostra.com',
+            password='NostraTest@2026!',
+            first_name='Carol',
+            last_name='Danvers',
+        )
+
+    def get_customer(self, pk, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.get(self.detail_url(pk))
+
+    def test_admin_can_retrieve_customer(self):
+        response = self.get_customer(self.customer.id, user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.customer.id)
+        self.assertEqual(response.data['username'], 'carolcustomer')
+        self.assertEqual(response.data['email'], 'carol@nostra.com')
+        self.assertEqual(response.data['first_name'], 'Carol')
+        self.assertEqual(response.data['last_name'], 'Danvers')
+        self.assertIn('is_active', response.data)
+        self.assertIn('date_joined', response.data)
+
+    def test_unauthenticated_request_is_rejected(self):
+        response = self.client.get(self.detail_url(self.customer.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_normal_customer_is_forbidden(self):
+        response = self.get_customer(self.customer.id, user=self.customer)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_nonexistent_customer_returns_404(self):
+        response = self.get_customer(999999, user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_sensitive_fields_are_never_exposed(self):
+        response = self.get_customer(self.customer.id, user=self.staff_user)
+        for field in (
+            'password', 'password_hash', 'is_staff', 'is_superuser',
+            'last_login', 'groups', 'user_permissions',
+        ):
+            self.assertNotIn(field, response.data)

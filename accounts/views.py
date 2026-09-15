@@ -38,3 +38,15 @@ class CustomerListAdminView(generics.ListAPIView):
     search_fields = ['username', 'email', 'first_name', 'last_name']
     ordering_fields = ['date_joined', 'username', 'email']
     pagination_class = ProductPagination
+
+
+class CustomerDetailAdminView(generics.RetrieveAPIView):
+    """Staff/admin-only: retrieve a single customer account. Reuses
+    CustomerSerializer as-is (same safe field set as
+    CustomerListAdminView, same excluded sensitive fields) — no
+    pagination here, a single-object detail view has nothing to
+    paginate. Read-only, same as the list view: no
+    update/deactivate/delete here."""
+    serializer_class = CustomerSerializer
+    permission_classes = [IsAdminUser]
+    queryset = User.objects.all()
