@@ -204,6 +204,51 @@ class CartItemVariantSerializer(serializers.ModelSerializer):
         ]
 
 
+class AdminProductVariantSerializer(serializers.ModelSerializer):
+    """Staff-only variant/inventory management serializer
+    (AdminProductVariantListView/AdminProductVariantDetailView).
+
+    product/size/color are read-only here (nested, reusing
+    ProductSummarySerializer/ProductSizeSerializer/ProductColorSerializer
+    — the same shape as CartItemVariantSerializer, so a product's price
+    is visible via the nested product object even though ProductVariant
+    itself has no price field of its own). They're deliberately not
+    writable: ProductVariant's product+size+color combinations are
+    enforced by conditional UniqueConstraints (constraints with a
+    `condition=Q(...)`), which DRF cannot auto-generate a validator for
+    the way it does a plain unique_together — allowing them to be
+    reassigned via PATCH would risk an unhandled IntegrityError (a raw
+    500) instead of a clean 400. Reassigning a variant to a different
+    product/size/color is a data-modeling change, not an
+    inventory-management one, and isn't needed here.
+
+    sku/stock_quantity/is_active stay writable — that covers every real
+    inventory operation (restock, deactivate, correct SKU).
+    stock_quantity explicitly declares min_value=0 for a clear, documented
+    400 on a negative value (ProductVariant.stock_quantity is already a
+    PositiveIntegerField, so DRF would reject a negative value with a 400
+    even without this — this just makes that guarantee explicit here)."""
+    product = ProductSummarySerializer(read_only=True)
+    size = ProductSizeSerializer(read_only=True)
+    color = ProductColorSerializer(read_only=True)
+    stock_quantity = serializers.IntegerField(min_value=0)
+
+    class Meta:
+        model = ProductVariant
+        fields = [
+            'id',
+            'product',
+            'size',
+            'color',
+            'sku',
+            'stock_quantity',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
 class CartItemSerializer(serializers.ModelSerializer):
     variant = CartItemVariantSerializer(read_only=True)
 

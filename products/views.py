@@ -10,7 +10,13 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
-from .filters import AdminCategoryFilter, AdminProductFilter, OrderFilter, ProductFilter
+from .filters import (
+    AdminCategoryFilter,
+    AdminProductFilter,
+    AdminProductVariantFilter,
+    OrderFilter,
+    ProductFilter,
+)
 from .models import (
     Address,
     Cart,
@@ -28,6 +34,7 @@ from .serializers import (
     AddressSerializer,
     AdminCategorySerializer,
     AdminProductSerializer,
+    AdminProductVariantSerializer,
     CartItemSerializer,
     CartSerializer,
     CategorySerializer,
@@ -193,6 +200,53 @@ class AdminCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
                     ),
                 },
             )
+
+
+# --- Product variant / inventory management (staff/admin only) -----------
+# No DELETE here, deliberately: unlike Product/Category, a hard delete of a
+# ProductVariant wouldn't just risk an unhandled ProtectedError for variants
+# that have order history (OrderItem.variant is on_delete=PROTECT, same
+# protection) — it would also silently CASCADE-delete matching CartItem rows
+# for any customer who currently has that variant in their cart, with no
+# error and no chance to warn anyone (CartItem.variant is on_delete=CASCADE,
+# not PROTECT). That's a silent side effect on other users' data, not just a
+# handleable exception, so deactivation (PATCH is_active=false) is the only
+# safe way to retire a variant through this endpoint.
+
+def _admin_variants_optimized():
+    """Every variant with its product/size/color fetched up front to
+    avoid N+1 queries when AdminProductVariantSerializer nests them."""
+    return ProductVariant.objects.select_related('product', 'size', 'color')
+
+
+class AdminProductVariantListView(generics.ListAPIView):
+    """Staff/admin-only: list every product variant. Filter by
+    product/size/color/is_active, search by sku or product name (the
+    same search_fields ProductVariantAdmin already uses in admin.py),
+    order by stock_quantity/created_at/updated_at — all existing
+    ProductVariant fields/relationships, nothing invented."""
+    serializer_class = AdminProductVariantSerializer
+    permission_classes = [IsAdminUser]
+    queryset = _admin_variants_optimized().order_by('-created_at')
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+    filterset_class = AdminProductVariantFilter
+    search_fields = ['sku', 'product__name']
+    ordering_fields = ['stock_quantity', 'created_at', 'updated_at']
+    pagination_class = ProductPagination
+
+
+class AdminProductVariantDetailView(generics.RetrieveUpdateAPIView):
+    """Staff/admin-only: retrieve or partially update a single variant.
+    No PUT (full replace isn't useful here since product/size/color are
+    read-only anyway) and no DELETE — see the module comment above."""
+    serializer_class = AdminProductVariantSerializer
+    permission_classes = [IsAdminUser]
+    queryset = _admin_variants_optimized()
+    http_method_names = ['get', 'patch']
 
 
 # --- Cart -------------------------------------------------------------

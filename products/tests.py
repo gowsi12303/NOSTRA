@@ -4192,3 +4192,205 @@ class AdminCategoryAPITests(APITestCase):
         response = self.client.get(f'/api/products/categories/{self.active_category.id}/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['id'], self.active_category.id)
+
+
+class AdminProductVariantAPITests(APITestCase):
+    """/api/products/admin/variants/ and
+    /api/products/admin/variants/<pk>/ — staff-only variant/inventory
+    management (Step 121)."""
+
+    list_url = '/api/products/admin/variants/'
+
+    def detail_url(self, pk):
+        return f'/api/products/admin/variants/{pk}/'
+
+    def setUp(self):
+        self.staff_user = User.objects.create_user(
+            username='adminvariantstaff',
+            email='adminvariantstaff@nostra.com',
+            password='OrderPass@2026!',
+            is_staff=True,
+        )
+        self.customer = User.objects.create_user(
+            username='adminvariantcustomer',
+            email='adminvariantcustomer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt', description='A t-shirt', price='25.00', category=self.category,
+        )
+        self.size_m = ProductSize.objects.create(product=self.product, size='M')
+        self.size_l = ProductSize.objects.create(product=self.product, size='L')
+        self.color_red = ProductColor.objects.create(product=self.product, color_name='Red')
+        self.variant = ProductVariant.objects.create(
+            product=self.product, size=self.size_m, sku='TSHIRT-M', stock_quantity=10,
+        )
+        self.other_variant = ProductVariant.objects.create(
+            product=self.product, size=self.size_l, sku='TSHIRT-L', stock_quantity=3, is_active=False,
+        )
+
+    # --- Authentication / authorization -------------------------------
+
+    def test_unauthenticated_list_returns_401(self):
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_unauthenticated_detail_returns_401(self):
+        response = self.client.get(self.detail_url(self.variant.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_normal_customer_list_returns_403(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_normal_customer_detail_returns_403(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get(self.detail_url(self.variant.id))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- List / retrieve -------------------------------------------------
+
+    def test_admin_can_list_variants(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        skus = {item['sku'] for item in response.data['results']}
+        self.assertEqual(skus, {'TSHIRT-M', 'TSHIRT-L'})
+
+    def test_admin_can_retrieve_variant(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.detail_url(self.variant.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.variant.id)
+        self.assertEqual(response.data['sku'], 'TSHIRT-M')
+        self.assertEqual(response.data['stock_quantity'], 10)
+        self.assertEqual(response.data['product']['id'], self.product.id)
+        self.assertEqual(Decimal(response.data['product']['price']), Decimal('25.00'))
+        self.assertEqual(response.data['size']['size'], 'M')
+
+    def test_nonexistent_variant_returns_404(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.detail_url(999999))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- Update ------------------------------------------------------------
+
+    def test_admin_can_update_stock(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.variant.id), {'stock_quantity': 42}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 42)
+
+    def test_admin_can_update_other_writable_fields(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.variant.id),
+            {'sku': 'TSHIRT-M-NEW', 'is_active': False},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.sku, 'TSHIRT-M-NEW')
+        self.assertFalse(self.variant.is_active)
+
+    def test_negative_stock_rejected(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.variant.id), {'stock_quantity': -5}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('stock_quantity', response.data)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_client_cannot_reassign_product_size_color(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.variant.id),
+            {'size': self.size_l.id, 'color': self.color_red.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.size_id, self.size_m.id)
+        self.assertIsNone(self.variant.color_id)
+
+    def test_client_cannot_override_server_managed_fields(self):
+        self.client.force_authenticate(user=self.staff_user)
+        original_created_at = self.variant.created_at
+        response = self.client.patch(
+            self.detail_url(self.variant.id),
+            {'created_at': '2000-01-01T00:00:00Z'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.created_at, original_created_at)
+
+    def test_put_is_not_allowed(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.put(
+            self.detail_url(self.variant.id), {'stock_quantity': 5}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_delete_is_not_allowed(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.delete(self.detail_url(self.variant.id))
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    # --- Filtering / search / ordering / pagination -------------------
+
+    def test_product_filter(self):
+        other_product = Product.objects.create(
+            name='Shoe', description='A shoe', price='40.00', category=self.category,
+        )
+        other_size = ProductSize.objects.create(product=other_product, size='M')
+        other_variant = ProductVariant.objects.create(
+            product=other_product, size=other_size, sku='SHOE-M', stock_quantity=1,
+        )
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'product': other_product.id})
+        skus = {item['sku'] for item in response.data['results']}
+        self.assertEqual(skus, {'SHOE-M'})
+
+    def test_is_active_filter(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'is_active': 'false'})
+        skus = {item['sku'] for item in response.data['results']}
+        self.assertEqual(skus, {'TSHIRT-L'})
+
+    def test_search_by_sku(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'search': 'TSHIRT-L'})
+        skus = {item['sku'] for item in response.data['results']}
+        self.assertEqual(skus, {'TSHIRT-L'})
+
+    def test_search_by_product_name(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'search': 'T-Shirt'})
+        skus = {item['sku'] for item in response.data['results']}
+        self.assertEqual(skus, {'TSHIRT-M', 'TSHIRT-L'})
+
+    def test_ordering_by_stock_quantity(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'ordering': 'stock_quantity'})
+        quantities = [item['stock_quantity'] for item in response.data['results']]
+        self.assertEqual(quantities, sorted(quantities))
+
+    def test_pagination_default_page_size(self):
+        for i in range(15):
+            size = ProductSize.objects.create(product=self.product, size=f'X{i:03d}')
+            ProductVariant.objects.create(
+                product=self.product, size=size, sku=f'BULK-{i:03d}', stock_quantity=1,
+            )
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['results']), 12)
+        self.assertIsNotNone(response.data['next'])
