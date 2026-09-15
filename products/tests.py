@@ -2753,6 +2753,12 @@ class PaymentStatusUpdateAPITests(APITestCase):
             email='otherpaymentstatususer@nostra.com',
             password='OrderPass@2026!',
         )
+        self.staff_user = User.objects.create_user(
+            username='paymentstatusstaff',
+            email='paymentstatusstaff@nostra.com',
+            password='OrderPass@2026!',
+            is_staff=True,
+        )
         self.order = self._create_order(self.user, 'ORD-STATUS-0001', '80.00')
         self.other_order = self._create_order(self.other_user, 'ORD-STATUS-0002', '20.00')
 
@@ -2792,89 +2798,94 @@ class PaymentStatusUpdateAPITests(APITestCase):
 
     def test_pending_to_processing_succeeds(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PROCESSING)
 
     def test_processing_to_paid_succeeds(self):
         payment = self._create_payment(self.order, Payment.Status.PROCESSING)
-        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PAID)
 
     def test_pending_to_failed_succeeds(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'failed', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'failed', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.FAILED)
 
     def test_pending_to_cancelled_succeeds(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'cancelled', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'cancelled', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.CANCELLED)
 
     def test_paid_to_refunded_succeeds(self):
         payment = self._create_payment(self.order, Payment.Status.PAID)
-        response = self.patch_status(self.order.id, payment.id, 'refunded', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'refunded', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.REFUNDED)
 
     def test_invalid_transition_returns_400(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PENDING)
 
     def test_refunded_is_terminal(self):
         payment = self._create_payment(self.order, Payment.Status.REFUNDED)
-        response = self.patch_status(self.order.id, payment.id, 'pending', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'pending', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.REFUNDED)
 
     def test_failed_is_terminal(self):
         payment = self._create_payment(self.order, Payment.Status.FAILED)
-        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.FAILED)
 
     def test_cancelled_is_terminal(self):
         payment = self._create_payment(self.order, Payment.Status.CANCELLED)
-        response = self.patch_status(self.order.id, payment.id, 'pending', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'pending', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.CANCELLED)
 
     def test_invalid_status_value_returns_400(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'not-a-real-status', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'not-a-real-status', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PENDING)
 
-    def test_another_users_payment_cannot_be_updated(self):
+    def test_staff_can_update_another_customers_payment(self):
+        # Ownership scoping was removed when this endpoint became
+        # staff-only (Step 92): staff must be able to update any
+        # customer's payment, not just payments on orders they placed
+        # themselves.
         other_payment = self._create_payment(self.other_order, Payment.Status.PENDING)
         response = self.patch_status(
-            self.other_order.id, other_payment.id, 'processing', user=self.user,
+            self.other_order.id, other_payment.id, 'processing', user=self.staff_user,
         )
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         other_payment.refresh_from_db()
-        self.assertEqual(other_payment.status, Payment.Status.PENDING)
+        self.assertEqual(other_payment.status, Payment.Status.PROCESSING)
 
     def test_payment_from_another_order_cannot_be_updated(self):
-        # self.user's own payment, but referenced via a different order_id
-        # that also belongs to self.user — must still 404.
+        # The payment exists, but under a different order_id than the one
+        # in the URL — must still 404, regardless of who owns either
+        # order (this is a URL/data consistency check, not ownership).
         payment = self._create_payment(self.order, Payment.Status.PENDING)
         another_own_order = self._create_order(self.user, 'ORD-STATUS-0003', '15.00')
-        response = self.patch_status(another_own_order.id, payment.id, 'processing', user=self.user)
+        response = self.patch_status(another_own_order.id, payment.id, 'processing', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PENDING)
@@ -2887,14 +2898,14 @@ class PaymentStatusUpdateAPITests(APITestCase):
             status=Payment.Status.PAID,
         )
         second_payment = self._create_payment(self.order, Payment.Status.PROCESSING)
-        response = self.patch_status(self.order.id, second_payment.id, 'paid', user=self.user)
+        response = self.patch_status(self.order.id, second_payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         second_payment.refresh_from_db()
         self.assertEqual(second_payment.status, Payment.Status.PROCESSING)
 
     def test_successful_update_returns_updated_payment_fields(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.staff_user)
         self.assertEqual(response.data['id'], payment.id)
         self.assertEqual(response.data['order'], self.order.id)
         self.assertEqual(response.data['status'], Payment.Status.PROCESSING)
@@ -2908,12 +2919,31 @@ class PaymentStatusUpdateAPITests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_normal_customer_is_forbidden(self):
+        # A non-staff customer, including the payment's own owner, must
+        # not be able to change payment status — this endpoint is
+        # staff/admin only now (Step 92).
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_customer_cannot_mark_own_payment_as_paid(self):
+        payment = self._create_payment(self.order, Payment.Status.PROCESSING)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PROCESSING)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+
     def test_payment_paid_confirms_pending_order(self):
         # Step 87: marking a payment paid auto-advances its (still pending)
         # order to confirmed, reusing the existing pending -> confirmed
         # entry in ORDER_STATUS_TRANSITIONS.
         payment = self._create_payment(self.order, Payment.Status.PROCESSING)
-        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.CONFIRMED)
@@ -2923,7 +2953,7 @@ class PaymentStatusUpdateAPITests(APITestCase):
             self.user, 'ORD-STATUS-0004', '30.00', order_status=Order.Status.CONFIRMED,
         )
         payment = self._create_payment(order, Payment.Status.PROCESSING)
-        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.CONFIRMED)
@@ -2933,7 +2963,7 @@ class PaymentStatusUpdateAPITests(APITestCase):
             self.user, 'ORD-STATUS-0005', '30.00', order_status=Order.Status.SHIPPED,
         )
         payment = self._create_payment(order, Payment.Status.PROCESSING)
-        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.SHIPPED)
@@ -2943,7 +2973,7 @@ class PaymentStatusUpdateAPITests(APITestCase):
             self.user, 'ORD-STATUS-0006', '30.00', order_status=Order.Status.DELIVERED,
         )
         payment = self._create_payment(order, Payment.Status.PROCESSING)
-        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.DELIVERED)
@@ -2956,7 +2986,7 @@ class PaymentStatusUpdateAPITests(APITestCase):
             self.user, 'ORD-STATUS-0007', '30.00', order_status=Order.Status.CANCELLED,
         )
         payment = self._create_payment(order, Payment.Status.PROCESSING)
-        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PAID)
@@ -2965,7 +2995,7 @@ class PaymentStatusUpdateAPITests(APITestCase):
 
     def test_non_paid_payment_transition_does_not_change_order_status(self):
         payment = self._create_payment(self.order, Payment.Status.PENDING)
-        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PENDING)
@@ -2974,7 +3004,7 @@ class PaymentStatusUpdateAPITests(APITestCase):
         # The auto-confirm side effect must never change the response
         # contract: still 200 with PaymentSerializer data, not order data.
         payment = self._create_payment(self.order, Payment.Status.PROCESSING)
-        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.staff_user)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['id'], payment.id)
         self.assertEqual(response.data['order'], self.order.id)

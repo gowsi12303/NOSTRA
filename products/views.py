@@ -663,9 +663,17 @@ class PaymentStatusUpdateView(generics.GenericAPIView):
     payment. The only effect this has on Order.status: a payment reaching
     paid auto-confirms its order if (and only if) that order is still
     pending (see _confirm_order_after_payment) — every other payment
-    status change leaves Order.status untouched."""
+    status change leaves Order.status untouched.
+
+    Staff/admin only: IsAdminUser rejects unauthenticated requests with
+    401 and authenticated non-staff users with 403 — a normal customer,
+    including the payment's own owner, can no longer self-report their
+    payment as paid. Because only staff can reach this endpoint at all,
+    the lookup below is scoped to payment_id/order_id only (not
+    request.user) — staff must be able to update any customer's payment,
+    same as OrderStatusUpdateView."""
     serializer_class = PaymentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
 
     def patch(self, request, *args, **kwargs):
         input_serializer = PaymentStatusUpdateSerializer(data=request.data)
@@ -673,15 +681,15 @@ class PaymentStatusUpdateView(generics.GenericAPIView):
         new_status = input_serializer.validated_data['status']
 
         with transaction.atomic():
-            # Scoped to both the URL's order_id and request.user in one
-            # query: a payment belonging to another user, or to a
-            # different order than the one in the URL, both 404 here —
-            # no existence leak either way.
+            # Not scoped to request.user: this endpoint is staff/admin
+            # only (enforced by IsAdminUser above). Still scoped to the
+            # URL's order_id: a payment belonging to a different order
+            # than the one in the URL 404s here, no existence leak
+            # either way.
             payment = get_object_or_404(
                 Payment.objects.select_for_update().select_related('order'),
                 pk=self.kwargs['payment_id'],
                 order__pk=self.kwargs['order_id'],
-                order__user=request.user,
             )
 
             allowed_next_statuses = PAYMENT_STATUS_TRANSITIONS.get(payment.status, set())
