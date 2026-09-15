@@ -36,3 +36,25 @@ class CustomerSerializer(serializers.ModelSerializer):
             'date_joined',
         ]
         read_only_fields = fields
+
+
+class CurrentUserSerializer(serializers.ModelSerializer):
+    # Response-only representation for the authenticated "who am I"
+    # endpoint (CurrentUserView) — every signed-in user's own account,
+    # not a staff-only surface. Unlike CustomerSerializer, this
+    # deliberately includes is_staff (the frontend needs it to decide
+    # whether to show the admin UI), but still excludes
+    # password/is_superuser/last_login/groups/user_permissions — nothing
+    # beyond what's needed to identify the current user and whether
+    # they're staff.
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'email',
+            'first_name',
+            'last_name',
+            'is_staff',
+        ]
+        read_only_fields = fields

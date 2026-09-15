@@ -328,3 +328,58 @@ class CustomerDetailAdminAPITests(APITestCase):
             'last_login', 'groups', 'user_permissions',
         ):
             self.assertNotIn(field, response.data)
+
+
+class CurrentUserAPITests(APITestCase):
+    """GET /api/accounts/me/ — any authenticated user's own account
+    (Step 137)."""
+
+    url = '/api/accounts/me/'
+
+    def setUp(self):
+        self.customer = User.objects.create_user(
+            username='meuser',
+            email='meuser@nostra.com',
+            password='NostraTest@2026!',
+            first_name='Dana',
+            last_name='Scully',
+        )
+        self.staff_user = User.objects.create_user(
+            username='mestaff',
+            email='mestaff@nostra.com',
+            password='NostraTest@2026!',
+            is_staff=True,
+        )
+
+    def get_me(self, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.get(self.url)
+
+    def test_authenticated_customer_gets_200(self):
+        response = self.get_me(user=self.customer)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.customer.id)
+        self.assertEqual(response.data['username'], 'meuser')
+        self.assertEqual(response.data['email'], 'meuser@nostra.com')
+        self.assertEqual(response.data['first_name'], 'Dana')
+        self.assertEqual(response.data['last_name'], 'Scully')
+        self.assertFalse(response.data['is_staff'])
+
+    def test_authenticated_staff_gets_200_with_is_staff_true(self):
+        response = self.get_me(user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.staff_user.id)
+        self.assertTrue(response.data['is_staff'])
+
+    def test_unauthenticated_request_returns_401(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_sensitive_fields_are_never_exposed(self):
+        response = self.get_me(user=self.customer)
+        for field in (
+            'password', 'password_hash', 'is_superuser',
+            'last_login', 'groups', 'user_permissions',
+        ):
+            self.assertNotIn(field, response.data)

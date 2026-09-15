@@ -1,13 +1,13 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics
 from rest_framework.filters import OrderingFilter, SearchFilter
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from products.pagination import ProductPagination
 
 from .models import User
-from .serializers import CustomerSerializer, RegisterSerializer
+from .serializers import CurrentUserSerializer, CustomerSerializer, RegisterSerializer
 
 
 class RegisterView(generics.CreateAPIView):
@@ -18,6 +18,20 @@ class RegisterView(generics.CreateAPIView):
 class LoginView(TokenObtainPairView):
     """Accepts username/password and returns JWT access + refresh tokens."""
     permission_classes = [AllowAny]
+
+
+class CurrentUserView(generics.RetrieveAPIView):
+    """The authenticated request's own account — any signed-in user (not
+    staff-only, unlike CustomerListAdminView/CustomerDetailAdminView).
+    Exists so a frontend can know who's logged in and whether they're
+    staff (is_staff) without a separate admin-only lookup. No pk in the
+    URL — always resolves to request.user, so there's no ownership check
+    to get wrong."""
+    serializer_class = CurrentUserSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
 
 
 class CustomerListAdminView(generics.ListAPIView):
