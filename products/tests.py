@@ -2756,10 +2756,11 @@ class PaymentStatusUpdateAPITests(APITestCase):
         self.order = self._create_order(self.user, 'ORD-STATUS-0001', '80.00')
         self.other_order = self._create_order(self.other_user, 'ORD-STATUS-0002', '20.00')
 
-    def _create_order(self, user, order_number, total_amount):
+    def _create_order(self, user, order_number, total_amount, order_status=Order.Status.PENDING):
         return Order.objects.create(
             user=user,
             order_number=order_number,
+            status=order_status,
             shipping_full_name='Jane Doe',
             shipping_phone='9876543210',
             shipping_address_line1='123 Main St',
@@ -2907,11 +2908,79 @@ class PaymentStatusUpdateAPITests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_order_status_remains_unchanged_after_marking_paid(self):
+    def test_payment_paid_confirms_pending_order(self):
+        # Step 87: marking a payment paid auto-advances its (still pending)
+        # order to confirmed, reusing the existing pending -> confirmed
+        # entry in ORDER_STATUS_TRANSITIONS.
         payment = self._create_payment(self.order, Payment.Status.PROCESSING)
-        self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CONFIRMED)
+
+    def test_payment_paid_leaves_confirmed_order_unchanged(self):
+        order = self._create_order(
+            self.user, 'ORD-STATUS-0004', '30.00', order_status=Order.Status.CONFIRMED,
+        )
+        payment = self._create_payment(order, Payment.Status.PROCESSING)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
+
+    def test_payment_paid_leaves_shipped_order_unchanged(self):
+        order = self._create_order(
+            self.user, 'ORD-STATUS-0005', '30.00', order_status=Order.Status.SHIPPED,
+        )
+        payment = self._create_payment(order, Payment.Status.PROCESSING)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.SHIPPED)
+
+    def test_payment_paid_leaves_delivered_order_unchanged(self):
+        order = self._create_order(
+            self.user, 'ORD-STATUS-0006', '30.00', order_status=Order.Status.DELIVERED,
+        )
+        payment = self._create_payment(order, Payment.Status.PROCESSING)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DELIVERED)
+
+    def test_payment_paid_does_not_resurrect_cancelled_order(self):
+        # The order stays cancelled, but the payment status change itself
+        # must still succeed — this is never allowed to block the payment
+        # update.
+        order = self._create_order(
+            self.user, 'ORD-STATUS-0007', '30.00', order_status=Order.Status.CANCELLED,
+        )
+        payment = self._create_payment(order, Payment.Status.PROCESSING)
+        response = self.patch_status(order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PAID)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+
+    def test_non_paid_payment_transition_does_not_change_order_status(self):
+        payment = self._create_payment(self.order, Payment.Status.PENDING)
+        response = self.patch_status(self.order.id, payment.id, 'processing', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PENDING)
+
+    def test_paid_transition_response_is_payment_shaped(self):
+        # The auto-confirm side effect must never change the response
+        # contract: still 200 with PaymentSerializer data, not order data.
+        payment = self._create_payment(self.order, Payment.Status.PROCESSING)
+        response = self.patch_status(self.order.id, payment.id, 'paid', user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], payment.id)
+        self.assertEqual(response.data['order'], self.order.id)
+        self.assertEqual(response.data['status'], Payment.Status.PAID)
+        self.assertNotIn('items', response.data)
+        self.assertNotIn('order_number', response.data)
 
 
 class OrderStatusUpdateAPITests(APITestCase):

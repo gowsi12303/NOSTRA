@@ -597,6 +597,27 @@ PAYMENT_STATUS_TRANSITIONS = {
 }
 
 
+def _confirm_order_after_payment(order):
+    """Auto-advance an order from pending -> confirmed once one of its
+    payments has just become paid. Reuses ORDER_STATUS_TRANSITIONS (the
+    same table OrderStatusUpdateView enforces) as the single source of
+    truth for whether that's legal, instead of a separate rule — so if
+    the order isn't pending, this is a no-op: an already-confirmed,
+    shipped, or delivered order is left alone, and a cancelled order is
+    never resurrected. The payment update itself always still succeeds
+    regardless of what happens here.
+
+    Caller is responsible for locking the order row (select_for_update())
+    and passing in the freshly-locked instance, so this checks the
+    current status only after that lock is held."""
+    if order.status != Order.Status.PENDING:
+        return
+    if Order.Status.CONFIRMED not in ORDER_STATUS_TRANSITIONS.get(order.status, set()):
+        return
+    order.status = Order.Status.CONFIRMED
+    order.save(update_fields=['status', 'updated_at'])
+
+
 class PaymentStatusUpdateView(generics.GenericAPIView):
     """Update a payment's status for development/testing only — this is
     NOT a real Razorpay/Stripe webhook, and no gateway is integrated here.
@@ -604,7 +625,10 @@ class PaymentStatusUpdateView(generics.GenericAPIView):
     need to: only the transitions in PAYMENT_STATUS_TRANSITIONS are
     allowed, paid/failed/cancelled/refunded can't be reopened (except
     paid -> refunded), and an order is never allowed a second paid
-    payment. Order.status is never touched here."""
+    payment. The only effect this has on Order.status: a payment reaching
+    paid auto-confirms its order if (and only if) that order is still
+    pending (see _confirm_order_after_payment) — every other payment
+    status change leaves Order.status untouched."""
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated]
 
@@ -649,5 +673,12 @@ class PaymentStatusUpdateView(generics.GenericAPIView):
 
             payment.status = new_status
             payment.save(update_fields=['status', 'updated_at'])
+
+            if new_status == Payment.Status.PAID:
+                # Explicitly locked (independent of the select_related
+                # above) and re-checked before writing, same as every
+                # other status-changing lock in this file.
+                order = Order.objects.select_for_update().get(pk=payment.order_id)
+                _confirm_order_after_payment(order)
 
         return Response(PaymentSerializer(payment).data, status=status.HTTP_200_OK)
