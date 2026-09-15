@@ -104,3 +104,62 @@ class LoginAPITests(APITestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class TokenRefreshAPITests(APITestCase):
+    url = '/api/accounts/token/refresh/'
+    login_url = '/api/accounts/login/'
+    username = 'refreshuser'
+    password = 'NostraTest@2026!'
+
+    def setUp(self):
+        User.objects.create_user(
+            username=self.username,
+            email='refreshuser@nostra.com',
+            password=self.password,
+        )
+        login_response = self.client.post(
+            self.login_url,
+            {'username': self.username, 'password': self.password},
+            format='json',
+        )
+        self.access = login_response.data['access']
+        self.refresh = login_response.data['refresh']
+
+    def test_valid_refresh_token_returns_200_and_access_token(self):
+        response = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertTrue(response.data['access'])
+
+    def test_returned_access_token_can_authenticate_against_protected_endpoint(self):
+        response = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        new_access = response.data['access']
+
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {new_access}')
+        protected_response = self.client.get('/api/products/cart/')
+        self.assertEqual(protected_response.status_code, status.HTTP_200_OK)
+
+    def test_missing_refresh_field_returns_400(self):
+        response = self.client.post(self.url, {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_malformed_token_returns_401(self):
+        response = self.client.post(self.url, {'refresh': 'not-a-real-token'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_access_token_used_as_refresh_token_returns_401(self):
+        # Wrong token type: an access token is not a valid refresh token,
+        # even though it's a well-formed, currently-valid JWT.
+        response = self.client.post(self.url, {'refresh': self.access}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_no_authorization_header_required(self):
+        # The refresh endpoint must be reachable without an access-token
+        # Authorization header — the refresh token itself is the
+        # credential here. A fresh, uncredentialed client (no login, no
+        # force_authenticate, no Authorization header ever set) proves
+        # this on its own.
+        anonymous_client = self.client_class()
+        response = anonymous_client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
