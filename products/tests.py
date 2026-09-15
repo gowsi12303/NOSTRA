@@ -4394,3 +4394,47 @@ class AdminProductVariantAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data['results']), 12)
         self.assertIsNotNone(response.data['next'])
+
+
+class CorsConfigurationTests(APITestCase):
+    """Cross-cutting CORS behavior (Step 128), exercised against a public,
+    unauthenticated endpoint (/api/products/) so the request/response
+    cycle under test is purely about the CorsMiddleware, not auth."""
+
+    url = '/api/products/'
+    allowed_origin = 'http://localhost:5173'
+    disallowed_origin = 'http://evil.example.com'
+
+    def test_allowed_origin_preflight_request(self):
+        response = self.client.options(
+            self.url,
+            HTTP_ORIGIN=self.allowed_origin,
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD='GET',
+        )
+        self.assertIn(response.status_code, (200, 204))
+        self.assertEqual(response['Access-Control-Allow-Origin'], self.allowed_origin)
+
+    def test_disallowed_origin_preflight_request(self):
+        response = self.client.options(
+            self.url,
+            HTTP_ORIGIN=self.disallowed_origin,
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD='GET',
+        )
+        self.assertNotIn('Access-Control-Allow-Origin', response)
+
+    def test_allowed_origin_actual_response_carries_cors_header(self):
+        response = self.client.get(self.url, HTTP_ORIGIN=self.allowed_origin)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response['Access-Control-Allow-Origin'], self.allowed_origin)
+
+    def test_disallowed_origin_actual_response_has_no_cors_header(self):
+        # The request itself still succeeds (CORS is enforced by the
+        # browser reading the response headers, not by the server
+        # refusing the request) — it just isn't marked as CORS-enabled.
+        response = self.client.get(self.url, HTTP_ORIGIN=self.disallowed_origin)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('Access-Control-Allow-Origin', response)
+
+    def test_cors_allow_all_origins_is_not_enabled(self):
+        from django.conf import settings as django_settings
+        self.assertFalse(getattr(django_settings, 'CORS_ALLOW_ALL_ORIGINS', False))

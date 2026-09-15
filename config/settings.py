@@ -46,6 +46,7 @@ INSTALLED_APPS = [
 'django.contrib.messages',
 'django.contrib.staticfiles',
 
+'corsheaders',
 'rest_framework',
 'django_filters',
 'accounts',
@@ -55,6 +56,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -145,6 +147,25 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
 }
+
+
+# CORS (django-cors-headers)
+# https://github.com/adamchainz/django-cors-headers
+#
+# Explicit origin allowlist only — CORS_ALLOW_ALL_ORIGINS is deliberately
+# never used here. Defaults cover the common local frontend dev servers
+# (Create React App on :3000, Vite on :5173); override/extend via a
+# comma-separated CORS_ALLOWED_ORIGINS in .env for any other origin
+# (e.g. a deployed frontend) without touching this file.
+CORS_ALLOWED_ORIGINS = env.list(
+    'CORS_ALLOWED_ORIGINS',
+    default=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'http://localhost:5173',
+        'http://127.0.0.1:5173',
+    ],
+)
 
 
 # Email
