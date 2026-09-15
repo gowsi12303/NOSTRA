@@ -3170,3 +3170,78 @@ class OrderStatusUpdateAPITests(APITestCase):
         self.patch_status(order.id, 'confirmed', user=self.staff_user)
         payment.refresh_from_db()
         self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    # --- Step 90: stock restoration on cancellation ------------------------
+
+    def test_pending_to_cancelled_restores_stock(self):
+        # Simulate the checkout-time decrement (10 in stock, 3 ordered).
+        self.variant.stock_quantity = 7
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        order = self._create_order(self.user, 'ORD-OS-0015', Order.Status.PENDING)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=3, unit_price='25.00')
+
+        response = self.patch_status(order.id, 'cancelled', user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_confirmed_to_cancelled_restores_stock(self):
+        self.variant.stock_quantity = 6
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        order = self._create_order(self.user, 'ORD-OS-0016', Order.Status.CONFIRMED)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=4, unit_price='25.00')
+
+        response = self.patch_status(order.id, 'cancelled', user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_other_transitions_do_not_restore_stock(self):
+        self.variant.stock_quantity = 8
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        order = self._create_order(self.user, 'ORD-OS-0017', Order.Status.PENDING)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=2, unit_price='25.00')
+
+        response = self.patch_status(order.id, 'confirmed', user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 8)
+
+    def test_repeated_cancellation_does_not_restore_stock_twice(self):
+        self.variant.stock_quantity = 7
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        order = self._create_order(self.user, 'ORD-OS-0018', Order.Status.PENDING)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=3, unit_price='25.00')
+
+        first_response = self.patch_status(order.id, 'cancelled', user=self.staff_user)
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+        # cancelled is terminal — a second cancellation attempt must be
+        # rejected (400) and must not restore stock again.
+        second_response = self.patch_status(order.id, 'cancelled', user=self.staff_user)
+        self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_cancellation_restores_multiple_variants_correctly(self):
+        second_size = ProductSize.objects.create(product=self.product, size='L')
+        second_variant = ProductVariant.objects.create(
+            product=self.product, size=second_size, stock_quantity=5,
+        )
+        self.variant.stock_quantity = 7  # 10 - 3
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        second_variant.stock_quantity = 3  # 5 - 2
+        second_variant.save(update_fields=['stock_quantity', 'updated_at'])
+
+        order = self._create_order(self.user, 'ORD-OS-0019', Order.Status.PENDING)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=3, unit_price='25.00')
+        OrderItem.objects.create(order=order, variant=second_variant, quantity=2, unit_price='25.00')
+
+        response = self.patch_status(order.id, 'cancelled', user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        second_variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+        self.assertEqual(second_variant.stock_quantity, 5)

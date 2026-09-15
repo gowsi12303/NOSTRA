@@ -332,12 +332,44 @@ ORDER_STATUS_TRANSITIONS = {
 }
 
 
+def _restore_stock_for_cancelled_order(order):
+    """Restore each of the order's OrderItem quantities back onto its
+    ProductVariant.stock_quantity. Called only once, by
+    OrderStatusUpdateView, immediately after an order's transition has
+    landed on cancelled — never for any other transition. Locks the
+    involved variant rows first (in a fixed pk order, mirroring
+    OrderPlaceView's checkout locking, so concurrent stock-affecting
+    operations on the same variant can't deadlock or race each other),
+    then applies each restoration as an atomic conditional UPDATE, the
+    same pattern the checkout stock decrement uses.
+
+    Double restoration isn't a separate case to guard against here: since
+    cancelled is terminal in ORDER_STATUS_TRANSITIONS, a second attempt to
+    cancel an already-cancelled order is rejected by the transition check
+    in OrderStatusUpdateView.patch before this function is ever called
+    again for the same order."""
+    order_items = list(order.items.all())
+    if not order_items:
+        return
+
+    variant_ids = sorted({item.variant_id for item in order_items})
+    # Lock every involved variant row up front, in a fixed (pk) order, for
+    # the same deadlock-avoidance reason OrderPlaceView locks them before
+    # decrementing stock at checkout.
+    list(ProductVariant.objects.select_for_update().filter(pk__in=variant_ids).order_by('pk'))
+
+    for item in order_items:
+        ProductVariant.objects.filter(pk=item.variant_id).update(
+            stock_quantity=F('stock_quantity') + item.quantity,
+        )
+
+
 class OrderStatusUpdateView(generics.GenericAPIView):
     """Update an order's status. Enforces a one-way fulfillment state
     machine (ORDER_STATUS_TRANSITIONS) — delivered/cancelled can't be
     reopened, and every other transition not explicitly listed there is
-    rejected. Does not touch Payment, inventory, cart, or OrderItems —
-    this is order-lifecycle only.
+    rejected. Does not touch Payment or cart — this is order-lifecycle
+    (and, for cancellation only, inventory) only.
 
     Staff/admin only: IsAdminUser rejects unauthenticated requests with
     401 and authenticated non-staff users with 403. Because only staff
@@ -375,6 +407,9 @@ class OrderStatusUpdateView(generics.GenericAPIView):
 
             order.status = new_status
             order.save(update_fields=['status', 'updated_at'])
+
+            if new_status == Order.Status.CANCELLED:
+                _restore_stock_for_cancelled_order(order)
 
         return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
 
