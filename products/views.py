@@ -583,8 +583,11 @@ class PaymentCreateView(generics.GenericAPIView):
     belong to request.user (another user's order 404s); an order that's
     already delivered or cancelled (see ORDER_STATUSES_INELIGIBLE_FOR_PAYMENT)
     can't start a new attempt at all, and one that already has a PAID
-    payment can't start another either. Order.status is only ever changed
-    as a side effect of a payment reaching paid (see
+    payment can't start another either. Starting a new attempt supersedes
+    any pending/processing attempt still in flight for this order — those
+    are marked cancelled first, so at most one non-terminal Payment ever
+    exists per order at a time. Order.status is only ever changed as a
+    side effect of a payment reaching paid (see
     _confirm_order_after_payment) — never here."""
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated]
@@ -617,6 +620,18 @@ class PaymentCreateView(generics.GenericAPIView):
                     {'detail': 'This order has already been paid for.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+            # Starting a new attempt supersedes any attempt still in
+            # flight: at most one pending/processing Payment ever exists
+            # per order, so it's always clear which row is the live one.
+            # Terminal attempts (failed/cancelled/refunded) are left
+            # untouched — a paid one was already ruled out above.
+            superseded_attempts = order.payments.filter(
+                status__in=[Payment.Status.PENDING, Payment.Status.PROCESSING],
+            )
+            for attempt in superseded_attempts:
+                attempt.status = Payment.Status.CANCELLED
+                attempt.save(update_fields=['status', 'updated_at'])
 
             payment = Payment.objects.create(
                 order=order,

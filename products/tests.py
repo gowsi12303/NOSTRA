@@ -2616,12 +2616,13 @@ class PaymentCreateAPITests(APITestCase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PENDING)
 
-    def test_sequential_attempts_each_create_a_separate_pending_payment(self):
+    def test_sequential_attempts_supersede_previous_pending_attempt(self):
         # Not a timing/threading test — just confirms the locked,
         # transaction-wrapped check-and-create sequence still behaves
         # correctly and consistently across repeated calls in a row, and
         # that the lock is released cleanly between requests (a stuck lock
-        # would hang or fail the second call).
+        # would hang or fail the second call). Step 95: the second attempt
+        # now supersedes the first rather than leaving both pending.
         first = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
         second = self.pay(self.order.id, {'provider': 'razorpay'}, user=self.user)
 
@@ -2629,9 +2630,77 @@ class PaymentCreateAPITests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_201_CREATED)
         self.assertNotEqual(first.data['id'], second.data['id'])
         self.assertEqual(Payment.objects.filter(order=self.order).count(), 2)
-        self.assertTrue(
-            Payment.objects.filter(order=self.order, status=Payment.Status.PENDING).count() == 2
+
+        first_payment = Payment.objects.get(pk=first.data['id'])
+        second_payment = Payment.objects.get(pk=second.data['id'])
+        self.assertEqual(first_payment.status, Payment.Status.CANCELLED)
+        self.assertEqual(second_payment.status, Payment.Status.PENDING)
+
+    # --- Step 95: superseding pending/processing attempts -------------------
+
+    def test_new_payment_attempt_cancels_previous_pending_attempt(self):
+        first = Payment.objects.create(
+            order=self.order, provider='manual', amount=self.order.total_amount,
+            status=Payment.Status.PENDING,
         )
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(response.data['id'], first.id)
+        first.refresh_from_db()
+        self.assertEqual(first.status, Payment.Status.CANCELLED)
+        new_payment = Payment.objects.get(pk=response.data['id'])
+        self.assertEqual(new_payment.status, Payment.Status.PENDING)
+        self.assertEqual(Payment.objects.filter(order=self.order).count(), 2)
+
+    def test_new_payment_attempt_cancels_previous_processing_attempt(self):
+        first = Payment.objects.create(
+            order=self.order, provider='manual', amount=self.order.total_amount,
+            status=Payment.Status.PROCESSING,
+        )
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        first.refresh_from_db()
+        self.assertEqual(first.status, Payment.Status.CANCELLED)
+        new_payment = Payment.objects.get(pk=response.data['id'])
+        self.assertEqual(new_payment.status, Payment.Status.PENDING)
+
+    def test_new_payment_attempt_does_not_touch_terminal_attempts(self):
+        failed = Payment.objects.create(
+            order=self.order, provider='manual', amount=self.order.total_amount,
+            status=Payment.Status.FAILED,
+        )
+        cancelled = Payment.objects.create(
+            order=self.order, provider='manual', amount=self.order.total_amount,
+            status=Payment.Status.CANCELLED,
+        )
+        response = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        failed.refresh_from_db()
+        cancelled.refresh_from_db()
+        self.assertEqual(failed.status, Payment.Status.FAILED)
+        self.assertEqual(cancelled.status, Payment.Status.CANCELLED)
+        self.assertEqual(Payment.objects.filter(order=self.order).count(), 3)
+
+    def test_only_one_active_payment_survives_multiple_attempts(self):
+        first = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        second = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+        third = self.pay(self.order.id, {'provider': 'manual'}, user=self.user)
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(third.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Payment.objects.filter(order=self.order).count(), 3)
+
+        active_payments = Payment.objects.filter(
+            order=self.order,
+            status__in=[Payment.Status.PENDING, Payment.Status.PROCESSING],
+        )
+        self.assertEqual(active_payments.count(), 1)
+        self.assertEqual(active_payments.get().pk, third.data['id'])
+        cancelled_count = Payment.objects.filter(
+            order=self.order, status=Payment.Status.CANCELLED,
+        ).count()
+        self.assertEqual(cancelled_count, 2)
 
     def test_locked_order_lookup_still_scoped_to_request_user(self):
         # Re-confirms requirement 3 explicitly against the new
