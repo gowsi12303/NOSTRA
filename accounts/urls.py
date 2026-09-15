@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .views import LoginView, RegisterView
+from .views import CustomerListAdminView, LoginView, RegisterView
 
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
@@ -10,4 +10,5 @@ urlpatterns = [
     # new access token. Accessible without an access-token Authorization
     # header (AllowAny is DRF's default here, same as LoginView).
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
+    path('admin/customers/', CustomerListAdminView.as_view(), name='customer-list-admin'),
 ]

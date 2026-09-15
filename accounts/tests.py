@@ -163,3 +163,109 @@ class TokenRefreshAPITests(APITestCase):
         anonymous_client = self.client_class()
         response = anonymous_client.post(self.url, {'refresh': self.refresh}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class CustomerListAdminAPITests(APITestCase):
+    """GET /api/accounts/admin/customers/ — staff-only customer directory
+    (Step 112)."""
+
+    url = '/api/accounts/admin/customers/'
+
+    def setUp(self):
+        self.staff_user = User.objects.create_user(
+            username='customerliststaff',
+            email='customerliststaff@nostra.com',
+            password='NostraTest@2026!',
+            is_staff=True,
+        )
+        self.customer_one = User.objects.create_user(
+            username='alicecustomer',
+            email='alice@nostra.com',
+            password='NostraTest@2026!',
+            first_name='Alice',
+            last_name='Wonderland',
+        )
+        self.customer_two = User.objects.create_user(
+            username='bobcustomer',
+            email='bob@nostra.com',
+            password='NostraTest@2026!',
+            first_name='Bob',
+            last_name='Builder',
+            is_active=False,
+        )
+
+    def list_customers(self, params=None, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.get(self.url, params or {})
+
+    def test_admin_can_list_customers(self):
+        response = self.list_customers(user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        usernames = {item['username'] for item in response.data['results']}
+        self.assertIn('alicecustomer', usernames)
+
+    def test_admin_can_see_multiple_customers(self):
+        response = self.list_customers(user=self.staff_user)
+        # staff_user + customer_one + customer_two == 3
+        self.assertEqual(response.data['count'], 3)
+
+    def test_normal_customer_is_forbidden(self):
+        response = self.list_customers(user=self.customer_one)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unauthenticated_request_is_rejected(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_password_is_never_exposed(self):
+        response = self.list_customers(user=self.staff_user)
+        for item in response.data['results']:
+            self.assertNotIn('password', item)
+            self.assertNotIn('password_hash', item)
+
+    def test_expected_fields_are_present(self):
+        response = self.list_customers(user=self.staff_user)
+        item = next(i for i in response.data['results'] if i['username'] == 'alicecustomer')
+        for field in ('id', 'username', 'email', 'first_name', 'last_name', 'is_active', 'date_joined'):
+            self.assertIn(field, item)
+        self.assertEqual(item['email'], 'alice@nostra.com')
+        self.assertEqual(item['first_name'], 'Alice')
+        self.assertEqual(item['last_name'], 'Wonderland')
+
+    def test_search_by_username(self):
+        response = self.list_customers(params={'search': 'alicecustomer'}, user=self.staff_user)
+        usernames = [item['username'] for item in response.data['results']]
+        self.assertEqual(usernames, ['alicecustomer'])
+
+    def test_search_by_email(self):
+        response = self.list_customers(params={'search': 'bob@nostra.com'}, user=self.staff_user)
+        usernames = [item['username'] for item in response.data['results']]
+        self.assertEqual(usernames, ['bobcustomer'])
+
+    def test_search_by_first_name(self):
+        response = self.list_customers(params={'search': 'Wonderland'}, user=self.staff_user)
+        usernames = [item['username'] for item in response.data['results']]
+        self.assertEqual(usernames, ['alicecustomer'])
+
+    def test_ordering_by_username(self):
+        response = self.list_customers(params={'ordering': 'username'}, user=self.staff_user)
+        usernames = [item['username'] for item in response.data['results']]
+        self.assertEqual(usernames, sorted(usernames))
+
+    def test_is_active_filter(self):
+        response = self.list_customers(params={'is_active': 'false'}, user=self.staff_user)
+        usernames = {item['username'] for item in response.data['results']}
+        self.assertEqual(usernames, {'bobcustomer'})
+
+    def test_pagination_default_page_size(self):
+        for i in range(15):
+            User.objects.create_user(
+                username=f'pagecustomer{i:03d}',
+                email=f'pagecustomer{i:03d}@nostra.com',
+                password='NostraTest@2026!',
+            )
+        response = self.list_customers(user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['results']), 12)
+        self.assertIsNotNone(response.data['next'])
