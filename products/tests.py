@@ -3379,3 +3379,166 @@ class OrderStatusUpdateAPITests(APITestCase):
         second_variant.refresh_from_db()
         self.assertEqual(self.variant.stock_quantity, 10)
         self.assertEqual(second_variant.stock_quantity, 5)
+
+
+class OrderCancelAPITests(APITestCase):
+    """Customer self-service cancellation (Step 100) — the counterpart to
+    OrderStatusUpdateAPITests' staff-only cancellation. POST
+    /api/products/orders/<order_id>/cancel/, IsAuthenticated, scoped to
+    request.user."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='ordercanceluser',
+            email='ordercanceluser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otherordercanceluser',
+            email='otherordercanceluser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            stock_quantity=10,
+        )
+
+    def _create_order(self, user, order_number, order_status, total_amount='50.00'):
+        return Order.objects.create(
+            user=user,
+            order_number=order_number,
+            status=order_status,
+            shipping_full_name='Jane Doe',
+            shipping_phone='9876543210',
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal=total_amount,
+            total_amount=total_amount,
+        )
+
+    def cancel_url(self, order_id):
+        return f'/api/products/orders/{order_id}/cancel/'
+
+    def cancel(self, order_id, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.post(self.cancel_url(order_id))
+
+    def test_customer_can_cancel_own_pending_order(self):
+        order = self._create_order(self.user, 'ORD-OC-0001', Order.Status.PENDING)
+        response = self.cancel(order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+        self.assertEqual(response.data['status'], Order.Status.CANCELLED)
+        self.assertEqual(response.data['id'], order.id)
+
+    def test_customer_can_cancel_own_confirmed_order(self):
+        order = self._create_order(self.user, 'ORD-OC-0002', Order.Status.CONFIRMED)
+        response = self.cancel(order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+
+    def test_another_customers_order_cannot_be_cancelled(self):
+        other_order = self._create_order(self.other_user, 'ORD-OC-0003', Order.Status.PENDING)
+        response = self.cancel(other_order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        other_order.refresh_from_db()
+        self.assertEqual(other_order.status, Order.Status.PENDING)
+
+    def test_unauthenticated_request_is_rejected(self):
+        order = self._create_order(self.user, 'ORD-OC-0004', Order.Status.PENDING)
+        response = self.client.post(self.cancel_url(order.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PENDING)
+
+    def test_cancellation_restores_stock(self):
+        self.variant.stock_quantity = 7  # 10 - 3, as if checkout already ran
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        order = self._create_order(self.user, 'ORD-OC-0005', Order.Status.PENDING)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=3, unit_price='25.00')
+
+        response = self.cancel(order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_shipped_order_cannot_be_cancelled(self):
+        order = self._create_order(self.user, 'ORD-OC-0006', Order.Status.SHIPPED)
+        response = self.cancel(order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.SHIPPED)
+
+    def test_delivered_order_cannot_be_cancelled(self):
+        order = self._create_order(self.user, 'ORD-OC-0007', Order.Status.DELIVERED)
+        response = self.cancel(order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DELIVERED)
+
+    def test_already_cancelled_order_cannot_be_cancelled_again(self):
+        order = self._create_order(self.user, 'ORD-OC-0008', Order.Status.CANCELLED)
+        response = self.cancel(order.id, user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+
+    def test_repeated_cancellation_does_not_restore_stock_twice(self):
+        self.variant.stock_quantity = 7
+        self.variant.save(update_fields=['stock_quantity', 'updated_at'])
+        order = self._create_order(self.user, 'ORD-OC-0009', Order.Status.PENDING)
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=3, unit_price='25.00')
+
+        first_response = self.cancel(order.id, user=self.user)
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+        # cancelled is terminal — a second, repeated cancellation attempt
+        # must be rejected (400) and must not restore stock again.
+        second_response = self.cancel(order.id, user=self.user)
+        self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock_quantity, 10)
+
+    def test_admin_only_status_endpoint_still_works_unchanged(self):
+        # OrderStatusUpdateView (staff-only) must remain unaffected by
+        # this new customer-facing endpoint.
+        staff_user = User.objects.create_user(
+            username='ordercancelstaff',
+            email='ordercancelstaff@nostra.com',
+            password='OrderPass@2026!',
+            is_staff=True,
+        )
+        order = self._create_order(self.user, 'ORD-OC-0010', Order.Status.PENDING)
+        response = self.client.patch(
+            f'/api/products/orders/{order.id}/status/', {'status': 'cancelled'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(
+            f'/api/products/orders/{order.id}/status/', {'status': 'cancelled'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=staff_user)
+        response = self.client.patch(
+            f'/api/products/orders/{order.id}/status/', {'status': 'cancelled'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)

@@ -414,6 +414,48 @@ class OrderStatusUpdateView(generics.GenericAPIView):
         return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
 
 
+class OrderCancelView(generics.GenericAPIView):
+    """Let an authenticated customer cancel one of their own orders — the
+    self-service counterpart to OrderStatusUpdateView's staff-only
+    cancellation, not a replacement for it. Scoped to request.user, so
+    another user's order 404s, same as every other customer-owned order
+    endpoint.
+
+    Only legal per ORDER_STATUS_TRANSITIONS: since cancelled is only a
+    valid next status from pending or confirmed there, a shipped,
+    delivered, or already-cancelled order is rejected with 400 — no new
+    status or separate rule is introduced, this reuses the exact same
+    transition table OrderStatusUpdateView enforces. Restores stock the
+    same way a staff-initiated cancellation does, via
+    _restore_stock_for_cancelled_order."""
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        with transaction.atomic():
+            # Scoped to request.user: another user's order 404s here, no
+            # existence leak either way — this is a customer self-service
+            # endpoint, not admin/staff.
+            order = get_object_or_404(
+                Order.objects.select_for_update(),
+                pk=self.kwargs['order_id'],
+                user=request.user,
+            )
+
+            allowed_next_statuses = ORDER_STATUS_TRANSITIONS.get(order.status, set())
+            if Order.Status.CANCELLED not in allowed_next_statuses:
+                return Response(
+                    {'detail': f'Cannot cancel an order with status "{order.status}".'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            order.status = Order.Status.CANCELLED
+            order.save(update_fields=['status', 'updated_at'])
+            _restore_stock_for_cancelled_order(order)
+
+        return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+
 # --- Place Order --------------------------------------------------------
 
 class PlaceOrderInputSerializer(serializers.Serializer):

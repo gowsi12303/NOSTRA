@@ -8,6 +8,7 @@ from .views import (
     CartItemDetailView,
     CategoryDetailView,
     CategoryListView,
+    OrderCancelView,
     OrderDetailView,
     OrderListView,
     OrderPlaceView,
@@ -40,6 +41,7 @@ urlpatterns = [
         name='payment-status-update',
     ),
     path('orders/<int:order_id>/status/', OrderStatusUpdateView.as_view(), name='order-status-update'),
+    path('orders/<int:order_id>/cancel/', OrderCancelView.as_view(), name='order-cancel'),
     path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]
