@@ -3978,3 +3978,217 @@ class AdminProductAPITests(APITestCase):
         response = self.client.get(f'/api/products/{self.active_product.id}/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['id'], self.active_product.id)
+
+
+class AdminCategoryAPITests(APITestCase):
+    """/api/products/admin/categories/ and
+    /api/products/admin/categories/<pk>/ — staff-only category
+    management (Step 118)."""
+
+    list_url = '/api/products/admin/categories/'
+
+    def detail_url(self, pk):
+        return f'/api/products/admin/categories/{pk}/'
+
+    def setUp(self):
+        self.staff_user = User.objects.create_user(
+            username='admincategorystaff',
+            email='admincategorystaff@nostra.com',
+            password='OrderPass@2026!',
+            is_staff=True,
+        )
+        self.customer = User.objects.create_user(
+            username='admincategorycustomer',
+            email='admincategorycustomer@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.active_category = Category.objects.create(
+            name='Active Category', description='An active category', is_active=True,
+        )
+        self.inactive_category = Category.objects.create(
+            name='Inactive Category', description='An inactive category', is_active=False,
+        )
+
+    def valid_payload(self, **overrides):
+        payload = {
+            'name': 'New Category',
+            'description': 'A brand new category',
+            'is_active': True,
+        }
+        payload.update(overrides)
+        return payload
+
+    # --- Authentication / authorization -------------------------------
+
+    def test_unauthenticated_list_returns_401(self):
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_unauthenticated_detail_returns_401(self):
+        response = self.client.get(self.detail_url(self.active_category.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_normal_customer_list_returns_403(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_normal_customer_detail_returns_403(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get(self.detail_url(self.active_category.id))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- List / retrieve -------------------------------------------------
+
+    def test_admin_can_list_categories(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {item['name'] for item in response.data['results']}
+        self.assertIn('Active Category', names)
+
+    def test_inactive_categories_are_visible_to_admin(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        results_by_name = {item['name']: item for item in response.data['results']}
+        self.assertIn('Inactive Category', results_by_name)
+        self.assertFalse(results_by_name['Inactive Category']['is_active'])
+
+    def test_admin_can_retrieve_category(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.detail_url(self.active_category.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.active_category.id)
+        self.assertEqual(response.data['name'], 'Active Category')
+
+    # --- Create ------------------------------------------------------------
+
+    def test_admin_can_create_category(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(self.list_url, self.valid_payload(), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Category.objects.filter(name='New Category').exists())
+
+    def test_create_validation_failure_missing_required_fields(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(self.list_url, {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+
+    def test_create_validation_failure_duplicate_name(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(
+            self.list_url, self.valid_payload(name='Active Category'), format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+
+    def test_client_cannot_set_server_managed_fields_on_create(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.post(self.list_url, self.valid_payload(id=99999), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(response.data['id'], 99999)
+
+    # --- Update ------------------------------------------------------------
+
+    def test_admin_can_partially_update_category(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.active_category.id), {'description': 'Updated description'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.active_category.refresh_from_db()
+        self.assertEqual(self.active_category.description, 'Updated description')
+
+    def test_partial_update_validation_failure(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.patch(
+            self.detail_url(self.active_category.id),
+            {'name': self.inactive_category.name},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_client_cannot_override_server_managed_fields_on_update(self):
+        self.client.force_authenticate(user=self.staff_user)
+        original_created_at = self.active_category.created_at
+        response = self.client.patch(
+            self.detail_url(self.active_category.id),
+            {'created_at': '2000-01-01T00:00:00Z'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.active_category.refresh_from_db()
+        self.assertEqual(self.active_category.created_at, original_created_at)
+
+    # --- Delete --------------------------------------------------------
+
+    def test_admin_can_delete_unused_category(self):
+        category = Category.objects.create(name='Unused Category')
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.delete(self.detail_url(category.id))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Category.objects.filter(pk=category.id).exists())
+
+    def test_delete_blocked_when_products_reference_category(self):
+        Product.objects.create(
+            name='Category Product', description='desc', price='10.00',
+            category=self.active_category,
+        )
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.delete(self.detail_url(self.active_category.id))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Category.objects.filter(pk=self.active_category.id).exists())
+
+    # --- Filtering / search / ordering / pagination -------------------
+
+    def test_is_active_filter(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'is_active': 'false'})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Inactive Category'})
+
+    def test_search_by_name(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'search': 'Inactive'})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Inactive Category'})
+
+    def test_search_by_description(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'search': 'an active'})
+        names = {item['name'] for item in response.data['results']}
+        self.assertEqual(names, {'Active Category', 'Inactive Category'})
+
+    def test_ordering_by_name(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url, {'ordering': 'name'})
+        names = [item['name'] for item in response.data['results']]
+        self.assertEqual(names, sorted(names))
+
+    def test_pagination_default_page_size(self):
+        for i in range(15):
+            Category.objects.create(name=f'Bulk Category {i:03d}')
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['results']), 12)
+        self.assertIsNotNone(response.data['next'])
+
+    # --- Regression: public Category API must remain unaffected -------
+
+    def test_public_category_list_still_excludes_inactive_categories(self):
+        response = self.client.get('/api/products/categories/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {item['name'] for item in response.data}
+        self.assertIn('Active Category', names)
+        self.assertNotIn('Inactive Category', names)
+
+    def test_public_category_detail_still_404s_for_inactive_category(self):
+        response = self.client.get(f'/api/products/categories/{self.inactive_category.id}/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_category_detail_still_works_for_active_category(self):
+        response = self.client.get(f'/api/products/categories/{self.active_category.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.active_category.id)

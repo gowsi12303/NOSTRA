@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import Order, Product
+from .models import Category, Order, Product
 
 
 class ProductFilter(django_filters.FilterSet):
@@ -44,3 +44,10 @@ class AdminProductFilter(django_filters.FilterSet):
     class Meta:
         model = Product
         fields = ['category', 'is_active']
+
+
+class AdminCategoryFilter(django_filters.FilterSet):
+    """Used by the staff-only AdminCategoryListCreateView."""
+    class Meta:
+        model = Category
+        fields = ['is_active']

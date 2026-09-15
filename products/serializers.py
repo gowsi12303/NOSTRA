@@ -30,6 +30,28 @@ class CategorySerializer(serializers.ModelSerializer):
         ]
 
 
+class AdminCategorySerializer(serializers.ModelSerializer):
+    """Staff-only category management serializer
+    (AdminCategoryListCreateView/AdminCategoryDetailView) — a separate
+    serializer from the public, read-only-in-practice CategorySerializer
+    rather than modifying it. Functionally the same field list as
+    CategorySerializer (Category has no relations worth nesting here —
+    no unnecessary nested product data), but with id/created_at/
+    updated_at explicitly marked read-only, since this one is actually
+    used for writes."""
+    class Meta:
+        model = Category
+        fields = [
+            'id',
+            'name',
+            'description',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
 class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage

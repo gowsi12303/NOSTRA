@@ -3,6 +3,8 @@ from django.urls import path
 from .views import (
     AddressDetailView,
     AddressListCreateView,
+    AdminCategoryDetailView,
+    AdminCategoryListCreateView,
     AdminProductDetailView,
     AdminProductListCreateView,
     CartAddItemView,
@@ -48,6 +50,8 @@ urlpatterns = [
     path('admin/orders/', OrderListAdminView.as_view(), name='order-list-admin'),
     path('admin/products/', AdminProductListCreateView.as_view(), name='admin-product-list-create'),
     path('admin/products/<int:pk>/', AdminProductDetailView.as_view(), name='admin-product-detail'),
+    path('admin/categories/', AdminCategoryListCreateView.as_view(), name='admin-category-list-create'),
+    path('admin/categories/<int:pk>/', AdminCategoryDetailView.as_view(), name='admin-category-detail'),
     path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
     path('<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
 ]

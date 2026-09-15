@@ -10,7 +10,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
-from .filters import AdminProductFilter, OrderFilter, ProductFilter
+from .filters import AdminCategoryFilter, AdminProductFilter, OrderFilter, ProductFilter
 from .models import (
     Address,
     Cart,
@@ -26,6 +26,7 @@ from .models import (
 from .pagination import ProductPagination
 from .serializers import (
     AddressSerializer,
+    AdminCategorySerializer,
     AdminProductSerializer,
     CartItemSerializer,
     CartSerializer,
@@ -140,6 +141,58 @@ class CategoryDetailView(generics.RetrieveAPIView):
     serializer_class = CategorySerializer
     permission_classes = [AllowAny]
     queryset = Category.objects.filter(is_active=True)
+
+
+# --- Category management (staff/admin only) -------------------------------
+# Distinct from CategoryListView/CategoryDetailView above, which stay
+# public, read-only, and scoped to active categories only — nothing here
+# changes that existing customer-facing behavior.
+
+class AdminCategoryListCreateView(generics.ListCreateAPIView):
+    """Staff/admin-only: list every category (including inactive ones)
+    and create new categories. No nested product data — Category has
+    nothing worth prefetching here, so the plain queryset needs no
+    select_related/prefetch_related."""
+    serializer_class = AdminCategorySerializer
+    permission_classes = [IsAdminUser]
+    queryset = Category.objects.all().order_by('-created_at')
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+    filterset_class = AdminCategoryFilter
+    search_fields = ['name', 'description']
+    ordering_fields = ['created_at', 'name', 'is_active']
+    pagination_class = ProductPagination
+
+
+class AdminCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Staff/admin-only: retrieve, partially update, or delete a single
+    category (including inactive ones). Hard deletion is blocked — with
+    a 400, not a 500 — when any Product still references the category
+    (Product.category is on_delete=PROTECT); deactivating the category
+    (PATCH is_active=false) is the safe alternative in that case. No
+    change to that on_delete behavior itself — this only catches the
+    ProtectedError it already raises."""
+    serializer_class = AdminCategorySerializer
+    permission_classes = [IsAdminUser]
+    queryset = Category.objects.all()
+    http_method_names = ['get', 'patch', 'delete']
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError:
+            raise serializers.ValidationError(
+                {
+                    'detail': (
+                        'This category cannot be deleted because one or more '
+                        'products still reference it. Deactivate it instead '
+                        'by setting is_active to false.'
+                    ),
+                },
+            )
 
 
 # --- Cart -------------------------------------------------------------
