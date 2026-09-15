@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import Product
+from .models import Order, Product
 
 
 class ProductFilter(django_filters.FilterSet):
@@ -16,3 +16,22 @@ class ProductFilter(django_filters.FilterSet):
     class Meta:
         model = Product
         fields = ['category', 'min_price', 'max_price']
+
+
+class OrderFilter(django_filters.FilterSet):
+    """Used by the staff-only OrderListAdminView. `created_after`/
+    `created_before` compare against the date portion of created_at
+    (not the full timestamp), so `created_before` includes every order
+    placed on that date, not just ones before midnight."""
+    created_after = django_filters.DateFilter(
+        field_name='created_at',
+        lookup_expr='date__gte',
+    )
+    created_before = django_filters.DateFilter(
+        field_name='created_at',
+        lookup_expr='date__lte',
+    )
+
+    class Meta:
+        model = Order
+        fields = ['status', 'user', 'created_after', 'created_before']

@@ -3542,3 +3542,173 @@ class OrderCancelAPITests(APITestCase):
             f'/api/products/orders/{order.id}/status/', {'status': 'cancelled'}, format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class OrderListAdminAPITests(APITestCase):
+    """GET /api/products/admin/orders/ — staff-only listing of every
+    customer's orders (Step 108)."""
+
+    url = '/api/products/admin/orders/'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='adminorderlistuser',
+            email='adminorderlistuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.other_user = User.objects.create_user(
+            username='otheradminorderlistuser',
+            email='otheradminorderlistuser@nostra.com',
+            password='OrderPass@2026!',
+        )
+        self.staff_user = User.objects.create_user(
+            username='adminorderliststaff',
+            email='adminorderliststaff@nostra.com',
+            password='OrderPass@2026!',
+            is_staff=True,
+        )
+        self.category = Category.objects.create(name='Apparel')
+        self.product = Product.objects.create(
+            name='T-Shirt',
+            description='A t-shirt',
+            price='25.00',
+            category=self.category,
+        )
+        self.size = ProductSize.objects.create(product=self.product, size='M')
+        self.variant = ProductVariant.objects.create(
+            product=self.product,
+            size=self.size,
+            stock_quantity=10,
+        )
+
+    def _create_order(
+        self, user, order_number, order_status=Order.Status.PENDING,
+        total_amount='50.00', shipping_full_name='Jane Doe', shipping_phone='9876543210',
+    ):
+        return Order.objects.create(
+            user=user,
+            order_number=order_number,
+            status=order_status,
+            shipping_full_name=shipping_full_name,
+            shipping_phone=shipping_phone,
+            shipping_address_line1='123 Main St',
+            shipping_city='Chennai',
+            shipping_state='Tamil Nadu',
+            shipping_postal_code='600001',
+            shipping_country='India',
+            subtotal=total_amount,
+            total_amount=total_amount,
+        )
+
+    def list_orders(self, params=None, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.get(self.url, params or {})
+
+    def test_admin_can_list_all_orders(self):
+        self._create_order(self.user, 'ORD-ADM-0001')
+        self._create_order(self.other_user, 'ORD-ADM-0002')
+        response = self.list_orders(user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+        order_numbers = {item['order_number'] for item in response.data['results']}
+        self.assertEqual(order_numbers, {'ORD-ADM-0001', 'ORD-ADM-0002'})
+
+    def test_normal_customer_is_forbidden(self):
+        self._create_order(self.user, 'ORD-ADM-0003')
+        response = self.list_orders(user=self.user)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unauthenticated_request_is_rejected(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_status_filter(self):
+        self._create_order(self.user, 'ORD-ADM-0004', order_status=Order.Status.PENDING)
+        self._create_order(self.user, 'ORD-ADM-0005', order_status=Order.Status.CONFIRMED)
+        response = self.list_orders(params={'status': 'confirmed'}, user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['order_number'], 'ORD-ADM-0005')
+
+    def test_user_filter(self):
+        self._create_order(self.user, 'ORD-ADM-0006')
+        self._create_order(self.other_user, 'ORD-ADM-0007')
+        response = self.list_orders(params={'user': self.other_user.id}, user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['order_number'], 'ORD-ADM-0007')
+
+    def test_search_by_order_number(self):
+        self._create_order(self.user, 'ORD-UNIQUE-0008')
+        self._create_order(self.user, 'ORD-ADM-0009')
+        response = self.list_orders(params={'search': 'UNIQUE'}, user=self.staff_user)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['order_number'], 'ORD-UNIQUE-0008')
+
+    def test_search_by_shipping_full_name(self):
+        self._create_order(self.user, 'ORD-ADM-0010', shipping_full_name='Alice Wonderland')
+        self._create_order(self.user, 'ORD-ADM-0011', shipping_full_name='Bob Builder')
+        response = self.list_orders(params={'search': 'Wonderland'}, user=self.staff_user)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['order_number'], 'ORD-ADM-0010')
+
+    def test_search_by_shipping_phone(self):
+        self._create_order(self.user, 'ORD-ADM-0012', shipping_phone='9999999999')
+        self._create_order(self.user, 'ORD-ADM-0013', shipping_phone='8888888888')
+        response = self.list_orders(params={'search': '9999999999'}, user=self.staff_user)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['order_number'], 'ORD-ADM-0012')
+
+    def test_ordering_by_total_amount(self):
+        self._create_order(self.user, 'ORD-ADM-0014', total_amount='10.00')
+        self._create_order(self.user, 'ORD-ADM-0015', total_amount='90.00')
+        response = self.list_orders(params={'ordering': 'total_amount'}, user=self.staff_user)
+        order_numbers = [item['order_number'] for item in response.data['results']]
+        self.assertEqual(order_numbers, ['ORD-ADM-0014', 'ORD-ADM-0015'])
+
+    def test_ordering_by_order_number_descending(self):
+        self._create_order(self.user, 'ORD-ADM-A')
+        self._create_order(self.user, 'ORD-ADM-B')
+        response = self.list_orders(params={'ordering': '-order_number'}, user=self.staff_user)
+        order_numbers = [item['order_number'] for item in response.data['results']]
+        self.assertEqual(order_numbers, ['ORD-ADM-B', 'ORD-ADM-A'])
+
+    def test_created_at_date_range_filter(self):
+        old_order = self._create_order(self.user, 'ORD-ADM-0016')
+        Order.objects.filter(pk=old_order.pk).update(created_at='2020-01-01T00:00:00Z')
+        new_order = self._create_order(self.user, 'ORD-ADM-0017')
+        Order.objects.filter(pk=new_order.pk).update(created_at='2026-06-01T00:00:00Z')
+
+        response = self.list_orders(params={'created_after': '2025-01-01'}, user=self.staff_user)
+        order_numbers = {item['order_number'] for item in response.data['results']}
+        self.assertEqual(order_numbers, {'ORD-ADM-0017'})
+
+        response = self.list_orders(params={'created_before': '2020-06-01'}, user=self.staff_user)
+        order_numbers = {item['order_number'] for item in response.data['results']}
+        self.assertEqual(order_numbers, {'ORD-ADM-0016'})
+
+    def test_pagination_default_page_size(self):
+        for i in range(13):
+            self._create_order(self.user, f'ORD-ADM-PAGE-{i:03d}')
+        response = self.list_orders(user=self.staff_user)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 13)
+        self.assertEqual(len(response.data['results']), 12)
+        self.assertIsNotNone(response.data['next'])
+
+    def test_order_items_and_payments_are_included(self):
+        order = self._create_order(self.user, 'ORD-ADM-0018')
+        OrderItem.objects.create(order=order, variant=self.variant, quantity=2, unit_price='25.00')
+        Payment.objects.create(
+            order=order, provider='manual', amount=order.total_amount, status=Payment.Status.PENDING,
+        )
+
+        response = self.list_orders(user=self.staff_user)
+        result = response.data['results'][0]
+        self.assertIn('items', result)
+        self.assertIn('payments', result)
+        self.assertEqual(len(result['items']), 1)
+        self.assertEqual(len(result['payments']), 1)
+        self.assertEqual(result['items'][0]['quantity'], 2)
+        self.assertEqual(result['payments'][0]['status'], Payment.Status.PENDING)

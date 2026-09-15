@@ -10,7 +10,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
-from .filters import ProductFilter
+from .filters import OrderFilter, ProductFilter
 from .models import (
     Address,
     Cart,
@@ -454,6 +454,47 @@ class OrderCancelView(generics.GenericAPIView):
             _restore_stock_for_cancelled_order(order)
 
         return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+
+# --- Order management (staff/admin only, read-only) ----------------------
+
+def _all_orders_optimized():
+    """Every order — not scoped to a single user — with items (and each
+    item's variant/product/size/color) and payments fetched up front, to
+    avoid N+1 queries when OrderSerializer nests them. Same shape as
+    _user_orders_optimized, just without the per-user filter, since this
+    backs the staff-facing "all orders" list."""
+    return Order.objects.prefetch_related(
+        Prefetch(
+            'items',
+            queryset=OrderItem.objects.select_related(
+                'variant__product', 'variant__size', 'variant__color',
+            ),
+        ),
+        'payments',
+    )
+
+
+class OrderListAdminView(generics.ListAPIView):
+    """Staff/admin-only: every customer's orders (OrderListView, by
+    contrast, is scoped to request.user's own orders only). Read-only —
+    order status/cancellation still only ever change through
+    OrderStatusUpdateView/OrderCancelView, never here. Reuses
+    OrderSerializer as-is, so individual order rows don't carry a
+    customer identifier beyond what's already in it (shipping_full_name);
+    filter/search by `user`/order_number/phone to narrow down instead."""
+    serializer_class = OrderSerializer
+    permission_classes = [IsAdminUser]
+    queryset = _all_orders_optimized().order_by('-created_at')
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+    filterset_class = OrderFilter
+    search_fields = ['order_number', 'shipping_full_name', 'shipping_phone']
+    ordering_fields = ['created_at', 'total_amount', 'status', 'order_number']
+    pagination_class = ProductPagination
 
 
 # --- Place Order --------------------------------------------------------
