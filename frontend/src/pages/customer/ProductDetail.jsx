@@ -5,6 +5,247 @@ import { ENDPOINTS } from '../../api/endpoints'
 import Navbar from '../../components/customer/Navbar'
 import { useAuth } from '../../hooks/useAuth'
 
+// Page styles, scoped under `.product-detail-page`. Rendered through a
+// <style> with `href` + `precedence` so React 19 hoists it into the document
+// head once. Colors use light-dark() to follow the app's
+// `color-scheme: light dark`, matching Navbar, Home and Products.
+const productDetailStyles = `
+  .product-detail-page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 32px 16px 64px;
+  }
+
+  .product-detail-page .product-detail-back {
+    display: inline-block;
+    margin-bottom: 24px;
+    padding: 6px 0;
+    border-bottom: 1px solid transparent;
+    color: inherit;
+    font-size: 0.8rem;
+    letter-spacing: 0.15em;
+    opacity: 0.7;
+    text-decoration: none;
+    text-transform: uppercase;
+    transition: opacity 0.2s ease, border-color 0.2s ease;
+  }
+
+  .product-detail-page .product-detail-back:hover,
+  .product-detail-page .product-detail-back:focus-visible {
+    border-bottom-color: currentColor;
+    opacity: 1;
+  }
+
+  .product-detail-page .product-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .product-detail-page .product-detail-title {
+    margin: 0;
+    font-size: clamp(1.75rem, 5vw, 2.5rem);
+    font-weight: 300;
+    letter-spacing: 0.1em;
+    line-height: 1.2;
+  }
+
+  .product-detail-page .product-detail-category {
+    margin: 0;
+    font-size: 0.8rem;
+    letter-spacing: 0.2em;
+    opacity: 0.6;
+    text-transform: uppercase;
+  }
+
+  .product-detail-page .product-detail-images {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+    gap: 12px;
+  }
+
+  .product-detail-page .product-detail-images img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid light-dark(#e5e5e5, #333333);
+    border-radius: 4px;
+  }
+
+  .product-detail-page .product-detail-price {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 500;
+  }
+
+  .product-detail-page .product-detail-description {
+    margin: 0;
+    line-height: 1.7;
+    opacity: 0.8;
+  }
+
+  .product-detail-page .product-detail h2 {
+    margin: 0 0 10px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .product-detail-page .product-detail-sizes,
+  .product-detail-page .product-detail-colors {
+    padding-top: 16px;
+    border-top: 1px solid light-dark(#e5e5e5, #333333);
+  }
+
+  .product-detail-page .product-detail-sizes ul,
+  .product-detail-page .product-detail-colors ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .product-detail-page .product-detail-sizes li,
+  .product-detail-page .product-detail-colors li {
+    padding: 6px 14px;
+    border: 1px solid light-dark(#cccccc, #444444);
+    border-radius: 999px;
+    font-size: 0.85rem;
+  }
+
+  .product-detail-page .product-detail-add-to-cart {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+    padding: 24px 20px;
+    border: 1px solid light-dark(#e5e5e5, #333333);
+    border-radius: 4px;
+    box-shadow: 0 1px 3px light-dark(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.4));
+  }
+
+  .product-detail-page .product-detail-add-to-cart label {
+    font-size: 0.75rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  .product-detail-page .product-detail-add-to-cart select,
+  .product-detail-page .product-detail-add-to-cart input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid light-dark(#cccccc, #444444);
+    border-radius: 2px;
+    background-color: light-dark(#ffffff, #111111);
+    color: inherit;
+    font: inherit;
+  }
+
+  .product-detail-page .product-detail-add-to-cart input {
+    max-width: 120px;
+  }
+
+  .product-detail-page .product-detail-add-to-cart select:focus-visible,
+  .product-detail-page .product-detail-add-to-cart input:focus-visible {
+    outline: 2px solid light-dark(#111111, #f5f5f5);
+    outline-offset: 1px;
+  }
+
+  .product-detail-page .product-detail-add-to-cart p,
+  .product-detail-page .product-detail-add-to-wishlist p {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+
+  .product-detail-page [role='alert'] {
+    color: light-dark(#b00020, #ff8a8a);
+  }
+
+  .product-detail-page [role='status'] {
+    color: light-dark(#1b6e3c, #6ddc98);
+  }
+
+  .product-detail-page .product-detail-add-to-cart a {
+    color: inherit;
+  }
+
+  .product-detail-page .product-detail-add-to-cart button,
+  .product-detail-page .product-detail-add-to-wishlist button {
+    width: 100%;
+    padding: 14px 24px;
+    border: 1px solid light-dark(#111111, #f5f5f5);
+    font: inherit;
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  /* Primary: Add to Cart */
+  .product-detail-page .product-detail-add-to-cart button {
+    margin-top: 4px;
+    background-color: light-dark(#111111, #f5f5f5);
+    color: light-dark(#ffffff, #111111);
+  }
+
+  .product-detail-page .product-detail-add-to-cart button:hover:not(:disabled),
+  .product-detail-page .product-detail-add-to-cart button:focus-visible:not(:disabled) {
+    background-color: transparent;
+    color: light-dark(#111111, #f5f5f5);
+  }
+
+  /* Secondary: Add to Wishlist */
+  .product-detail-page .product-detail-add-to-wishlist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .product-detail-page .product-detail-add-to-wishlist button {
+    background-color: transparent;
+    color: light-dark(#111111, #f5f5f5);
+  }
+
+  .product-detail-page .product-detail-add-to-wishlist button:hover:not(:disabled),
+  .product-detail-page .product-detail-add-to-wishlist button:focus-visible:not(:disabled) {
+    background-color: light-dark(#111111, #f5f5f5);
+    color: light-dark(#ffffff, #111111);
+  }
+
+  .product-detail-page .product-detail-add-to-cart button:disabled,
+  .product-detail-page .product-detail-add-to-wishlist button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  @media (max-width: 480px) {
+    .product-detail-page {
+      padding: 24px 16px 48px;
+    }
+
+    .product-detail-page .product-detail-add-to-cart {
+      padding: 20px 16px;
+    }
+
+    .product-detail-page .product-detail-add-to-cart input {
+      max-width: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .product-detail-page .product-detail-back,
+    .product-detail-page .product-detail-add-to-cart button,
+    .product-detail-page .product-detail-add-to-wishlist button {
+      transition: none;
+    }
+  }
+`
+
 function variantLabel(variant) {
   return [variant.size?.size, variant.color?.color_name].filter(Boolean).join(' - ') || `Option ${variant.id}`
 }
@@ -126,10 +367,13 @@ function ProductDetail() {
   return (
     <>
       <Navbar />
-      <main>
-        <p>
-          <Link to="/products">← Back to Products</Link>
-        </p>
+      <style href="product-detail-styles" precedence="default">
+        {productDetailStyles}
+      </style>
+      <main className="product-detail-page">
+        <Link to="/products" className="product-detail-back">
+          ← Back to Products
+        </Link>
 
         {isLoading && <p>Loading product...</p>}
 
@@ -139,7 +383,7 @@ function ProductDetail() {
 
         {!isLoading && !notFound && !error && product && (
           <article className="product-detail">
-            <h1>{product.name}</h1>
+            <h1 className="product-detail-title">{product.name}</h1>
 
             {product.category && (
               <p className="product-detail-category">{product.category.name}</p>
