@@ -1,4 +1,12 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import AdminLayout from '../components/admin/AdminLayout'
+import AdminCategories from '../pages/admin/Categories'
+import AdminCustomers from '../pages/admin/Customers'
+import AdminDashboard from '../pages/admin/Dashboard'
+import AdminOrders from '../pages/admin/Orders'
+import AdminPayments from '../pages/admin/Payments'
+import AdminProducts from '../pages/admin/Products'
+import AdminVariants from '../pages/admin/Variants'
 import Addresses from '../pages/customer/Addresses'
 import Cart from '../pages/customer/Cart'
 import Checkout from '../pages/customer/Checkout'
@@ -30,6 +38,65 @@ function AppRoutes() {
           <Route path="/checkout" element={<Checkout />} />
           <Route path="/orders" element={<Orders />} />
           <Route path="/orders/:id" element={<OrderConfirmation />} />
+        </Route>
+
+        <Route element={<RequireStaff />}>
+          <Route
+            path="/admin"
+            element={
+              <AdminLayout>
+                <AdminDashboard />
+              </AdminLayout>
+            }
+          />
+          <Route
+            path="/admin/categories"
+            element={
+              <AdminLayout>
+                <AdminCategories />
+              </AdminLayout>
+            }
+          />
+          <Route
+            path="/admin/products"
+            element={
+              <AdminLayout>
+                <AdminProducts />
+              </AdminLayout>
+            }
+          />
+          <Route
+            path="/admin/variants"
+            element={
+              <AdminLayout>
+                <AdminVariants />
+              </AdminLayout>
+            }
+          />
+          <Route
+            path="/admin/orders"
+            element={
+              <AdminLayout>
+                <AdminOrders />
+              </AdminLayout>
+            }
+          />
+          <Route
+            path="/admin/customers"
+            element={
+              <AdminLayout>
+                <AdminCustomers />
+              </AdminLayout>
+            }
+          />
+          <Route
+            path="/admin/payments"
+            element={
+              <AdminLayout>
+                <AdminPayments />
+              </AdminLayout>
+            }
+          />
         </Route>
 
         <Route path="*" element={<Navigate to="/login" replace />} />
