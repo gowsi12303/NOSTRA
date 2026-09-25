@@ -11,8 +11,8 @@
 //   - cart retrieval, add item, update item quantity, remove item
 //   - wishlist list, add item, remove item
 //   - address list/create, retrieve/update/delete
-//   - order list, place order, order detail
-// Payments, order cancellation, and the admin endpoints are added in later steps.
+//   - order list, place order, order detail, order cancellation
+// Payments and the admin endpoints are added in later steps.
 
 export const ENDPOINTS = {
   // Accounts (see accounts/urls.py)
@@ -44,4 +44,5 @@ export const ENDPOINTS = {
   orders: '/api/products/orders/',
   orderPlace: '/api/products/orders/place/',
   orderDetail: (id) => `/api/products/orders/${id}/`,
+  orderCancel: (id) => `/api/products/orders/${id}/cancel/`,
 }

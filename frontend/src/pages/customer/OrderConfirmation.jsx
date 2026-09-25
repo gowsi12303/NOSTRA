@@ -1,9 +1,20 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
-import { apiGet } from '../../api/client'
+import { apiGet, apiPost } from '../../api/client'
 import { ENDPOINTS } from '../../api/endpoints'
 import Navbar from '../../components/customer/Navbar'
 import { useAuth } from '../../hooks/useAuth'
+
+// Mirrors the backend's ORDER_STATUS_TRANSITIONS (products/views.py):
+// OrderCancelView only ever allows cancelling from pending or confirmed.
+// This is a client-side mirror purely to decide whether to show the Cancel
+// button — the backend re-validates and rejects with 400 regardless of
+// what the frontend shows, so this never changes the actual status rules.
+const CANCELLABLE_STATUSES = ['pending', 'confirmed']
+
+function canCancelOrder(status) {
+  return CANCELLABLE_STATUSES.includes(status)
+}
 
 // Page styles, scoped under `.order-page`. Rendered through a <style> with
 // `href` + `precedence` so React 19 hoists it into the document head once.
@@ -264,6 +275,18 @@ const orderConfirmationStyles = `
     color: light-dark(#ffffff, #111111);
   }
 
+  .order-page .order-button-outline:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .order-page .order-cancel-button {
+    margin: 0 0 24px;
+    font: inherit;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+  }
+
   @media (max-width: 600px) {
     .order-page {
       padding: 24px 16px 48px;
@@ -345,6 +368,12 @@ function OrderConfirmation() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Cancellation feedback, kept separate from the initial-load state above
+  // so a cancel failure doesn't blank out the whole order view.
+  const [isCancelling, setIsCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState('')
+  const [cancelSuccess, setCancelSuccess] = useState('')
+
   useEffect(() => {
     if (!accessToken) return undefined
 
@@ -367,6 +396,27 @@ function OrderConfirmation() {
       cancelled = true
     }
   }, [accessToken, id])
+
+  async function handleCancelOrder() {
+    if (!window.confirm(`Cancel order ${order.order_number}? This cannot be undone.`)) return
+
+    setCancelError('')
+    setCancelSuccess('')
+    setIsCancelling(true)
+    try {
+      // The endpoint takes no request body — it only ever acts on the
+      // order in the URL, scoped to the signed-in user.
+      const updatedOrder = await apiPost(ENDPOINTS.orderCancel(order.id), null, { accessToken })
+      setOrder(updatedOrder)
+      setCancelSuccess('Your order has been cancelled.')
+    } catch (err) {
+      // A 400 here means the order is no longer cancellable (e.g. it was
+      // already shipped) — the backend's own message explains why.
+      setCancelError(err.message || 'Unable to cancel this order.')
+    } finally {
+      setIsCancelling(false)
+    }
+  }
 
   return (
     <>
@@ -408,6 +458,28 @@ function OrderConfirmation() {
               <p className="order-number">Order number: {order.order_number}</p>
               <p className="order-status">Status: {order.status}</p>
             </div>
+
+            {cancelError && (
+              <p role="alert" className="order-message">
+                {cancelError}
+              </p>
+            )}
+            {cancelSuccess && (
+              <p role="status" className="order-message">
+                {cancelSuccess}
+              </p>
+            )}
+
+            {canCancelOrder(order.status) && (
+              <button
+                type="button"
+                className="order-button order-button-outline order-cancel-button"
+                onClick={handleCancelOrder}
+                disabled={isCancelling}
+              >
+                {isCancelling ? 'Cancelling...' : 'Cancel Order'}
+              </button>
+            )}
 
             <section className="order-shipping-section">
               <h2>Shipping Address</h2>

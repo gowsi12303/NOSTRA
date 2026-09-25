@@ -1,9 +1,20 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { apiGet } from '../../api/client'
+import { apiGet, apiPost } from '../../api/client'
 import { ENDPOINTS } from '../../api/endpoints'
 import Navbar from '../../components/customer/Navbar'
 import { useAuth } from '../../hooks/useAuth'
+
+// Mirrors the backend's ORDER_STATUS_TRANSITIONS (products/views.py):
+// OrderCancelView only ever allows cancelling from pending or confirmed.
+// This is a client-side mirror purely to decide whether to show the Cancel
+// button — the backend re-validates and rejects with 400 regardless of
+// what the frontend shows, so this never changes the actual status rules.
+const CANCELLABLE_STATUSES = ['pending', 'confirmed']
+
+function canCancelOrder(status) {
+  return CANCELLABLE_STATUSES.includes(status)
+}
 
 // Page styles, scoped under `.orders-page`. Rendered through a <style> with
 // `href` + `precedence` so React 19 hoists it into the document head once.
@@ -42,6 +53,10 @@ const ordersStyles = `
     color: light-dark(#b00020, #ff8a8a);
   }
 
+  .orders-page [role='status'] {
+    color: light-dark(#1b6e3c, #6ddc98);
+  }
+
   /* Outlined secondary button style, shared by the empty-state link and
      each order's View Order link. */
   .orders-page .orders-button {
@@ -63,6 +78,21 @@ const ordersStyles = `
   .orders-page .orders-button:focus-visible {
     background-color: light-dark(#111111, #f5f5f5);
     color: light-dark(#ffffff, #111111);
+  }
+
+  .orders-page button.orders-button {
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .orders-page button.orders-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .orders-page button.orders-button:disabled:hover {
+    background-color: transparent;
+    color: light-dark(#111111, #f5f5f5);
   }
 
   .orders-page .order-list {
@@ -134,9 +164,12 @@ const ordersStyles = `
     white-space: nowrap;
   }
 
-  .orders-page .order-list-item .orders-button {
+  .orders-page .order-actions {
     grid-column: 4;
     grid-row: 1 / span 2;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
   /* Small screens: the order number gets the full top row (it is long and
@@ -180,10 +213,11 @@ const ordersStyles = `
       margin-top: 12px;
     }
 
-    .orders-page .order-list-item .orders-button {
+    .orders-page .order-actions {
       grid-column: 2;
       grid-row: 3;
       margin-top: 12px;
+      align-items: flex-end;
     }
   }
 
@@ -200,6 +234,13 @@ function Orders() {
   const [orders, setOrders] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
+
+  // Which order is currently being cancelled, plus feedback for that
+  // action — kept separate from the initial-load state above so a cancel
+  // failure doesn't blank out the whole list.
+  const [pendingCancelId, setPendingCancelId] = useState(null)
+  const [cancelError, setCancelError] = useState('')
+  const [cancelSuccess, setCancelSuccess] = useState('')
 
   useEffect(() => {
     if (!accessToken) return undefined
@@ -226,6 +267,29 @@ function Orders() {
     }
   }, [accessToken])
 
+  async function handleCancelOrder(order) {
+    if (!window.confirm(`Cancel order ${order.order_number}? This cannot be undone.`)) return
+
+    setCancelError('')
+    setCancelSuccess('')
+    setPendingCancelId(order.id)
+    try {
+      // The endpoint takes no request body — it only ever acts on the
+      // order in the URL, scoped to the signed-in user. Replacing this
+      // order's entry with the response (rather than refetching the whole
+      // list) refreshes its displayed status immediately.
+      const updatedOrder = await apiPost(ENDPOINTS.orderCancel(order.id), null, { accessToken })
+      setOrders((current) => current.map((o) => (o.id === order.id ? updatedOrder : o)))
+      setCancelSuccess(`Order ${order.order_number} was cancelled.`)
+    } catch (err) {
+      // A 400 here means the order is no longer cancellable (e.g. it was
+      // already shipped) — the backend's own message explains why.
+      setCancelError(err.message || 'Unable to cancel this order.')
+    } finally {
+      setPendingCancelId(null)
+    }
+  }
+
   return (
     <>
       <Navbar />
@@ -243,6 +307,18 @@ function Orders() {
           </p>
         )}
 
+        {!isLoading && !error && cancelError && (
+          <p role="alert" className="orders-message">
+            {cancelError}
+          </p>
+        )}
+
+        {!isLoading && !error && cancelSuccess && (
+          <p role="status" className="orders-message">
+            {cancelSuccess}
+          </p>
+        )}
+
         {!isLoading && !error && orders.length === 0 && (
           <>
             <p className="orders-message orders-empty">You have not placed any orders yet.</p>
@@ -254,17 +330,33 @@ function Orders() {
 
         {!isLoading && !error && orders.length > 0 && (
           <ul className="order-list">
-            {orders.map((order) => (
-              <li key={order.id} className="order-list-item">
-                <span className="order-number">{order.order_number}</span>
-                <span className="order-status">Status: {order.status}</span>
-                <span className="order-date">{new Date(order.created_at).toLocaleString()}</span>
-                <span className="order-total">Total: ₹{Number(order.total_amount)}</span>
-                <Link to={`/orders/${order.id}`} className="orders-button">
-                  View Order
-                </Link>
-              </li>
-            ))}
+            {orders.map((order) => {
+              const isCancelling = pendingCancelId === order.id
+
+              return (
+                <li key={order.id} className="order-list-item">
+                  <span className="order-number">{order.order_number}</span>
+                  <span className="order-status">Status: {order.status}</span>
+                  <span className="order-date">{new Date(order.created_at).toLocaleString()}</span>
+                  <span className="order-total">Total: ₹{Number(order.total_amount)}</span>
+                  <div className="order-actions">
+                    <Link to={`/orders/${order.id}`} className="orders-button">
+                      View Order
+                    </Link>
+                    {canCancelOrder(order.status) && (
+                      <button
+                        type="button"
+                        className="orders-button"
+                        onClick={() => handleCancelOrder(order)}
+                        disabled={isCancelling}
+                      >
+                        {isCancelling ? 'Cancelling...' : 'Cancel Order'}
+                      </button>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
           </ul>
         )}
       </main>
