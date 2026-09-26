@@ -2,24 +2,23 @@
 
 ## Overview
 
-NOSTRA is a Full Stack Python/Django e-commerce backend project built to
-demonstrate real-world backend engineering: authentication, catalog
-browsing, cart/wishlist management, checkout with stock control, order
-lifecycle management, and a payment-attempt flow — all exposed as a JSON
-REST API built with Django REST Framework.
-
-This is a backend-focused portfolio project. It currently has no frontend
-UI; it is designed to be consumed by a future frontend or by API clients
-such as Postman/curl.
+NOSTRA is a full-stack fashion e-commerce platform built to demonstrate
+real-world engineering across the whole stack: a Python/Django REST
+Framework backend (authentication, catalog browsing, cart/wishlist
+management, checkout with stock control, order lifecycle management, and
+a payment-attempt flow, all exposed as a JSON REST API) paired with a
+React (Vite) frontend that provides a customer storefront and a
+staff-only admin dashboard.
 
 ## Project Status
 
-**🚧 In Progress**
+**✅ Functionally complete (customer + admin) — not yet production-hardened or deployed**
 
-This project is under active development. It is not production-ready and
-is not deployed. Features are being added and refined incrementally; see
-[Planned / Upcoming Features](#planned--upcoming-features) for what's not
-built yet.
+The customer storefront, the staff-only admin dashboard, and the Django
+REST Framework API are functionally complete. What remains is production
+hardening and deployment — see [Production Readiness
+Notes](#production-readiness-notes) and [Planned / Upcoming
+Features](#planned--upcoming-features) for what's still ahead.
 
 ## Key Implemented Features
 
@@ -34,12 +33,22 @@ built yet.
 - **Address management** — multiple saved addresses with a single default
 - **Order placement** — checkout from the cart into an `Order`
 - **Order management** — list/view own orders; controlled status updates
+- **Order cancellation** — customers can cancel their own `pending`/
+  `confirmed` orders; stock is restored automatically
 - **Payment attempt / status APIs** — create payment attempts and advance
   their status through a controlled state machine (see
   [Payment](#payment))
 - **Admin/staff-only order status management** — order fulfillment status
   can only be updated by staff users
 - **API documentation** — see [API_DOCUMENTATION.md](API_DOCUMENTATION.md)
+- **Customer frontend** — a React (Vite) storefront covering product
+  browsing with pagination, product detail, cart, wishlist, address book,
+  checkout, order history, customer-initiated order cancellation (for
+  `pending`/`confirmed` orders), and a Pay Now / payment-attempt UI
+- **Admin frontend** — a staff-only React dashboard with a summary
+  Dashboard, full management screens for Categories, Products, and
+  Variants/Inventory, and read-only browsing screens for Orders,
+  Customers, and Payments
 
 ## Tech Stack
 
@@ -50,6 +59,10 @@ built yet.
 - **SQLite** — current development database
 - **django-filter** — product filtering
 - **Pillow** — image handling for product images
+- **React 19** — customer and admin frontends
+- **React Router 7** — client-side routing
+- **Vite** — frontend build tooling and dev server
+- Plain scoped CSS — no UI framework, light/dark aware
 - **Git / GitHub** — version control
 
 ## API Documentation
@@ -68,6 +81,8 @@ NOSTRA/
 ├── accounts/                # Custom user model, registration, JWT login
 ├── products/                 # Core app: products, cart, wishlist,
 │                              # addresses, orders, payments
+├── frontend/                  # React (Vite) app — customer storefront +
+│                               # staff-only admin dashboard
 ├── API_DOCUMENTATION.md      # Full API reference
 ├── manage.py                 # Django management entry point
 └── requirements.txt           # Python dependencies
@@ -92,13 +107,16 @@ endpoint.
 
 ## Testing
 
-- **262 tests passing**
+- **407 tests passing**
 - `python manage.py check` passes with no issues
 
 Tests cover authentication, product/category browsing, cart, wishlist,
 addresses, order placement and lifecycle, and payment attempt/status
 behavior, including ownership scoping, permission checks, and status
 transition rules.
+
+There is currently no automated frontend test suite and no CI/CD
+pipeline — these 407 backend tests run only when invoked manually.
 
 ## Engineering Highlights
 
@@ -114,7 +132,9 @@ transition rules.
 - Controlled, one-way order and payment status state machines — only
   explicitly allowed transitions succeed; everything else is rejected
   with `400 Bad Request`
-- Admin-only order status updates, enforced with DRF's `IsAdminUser`
+- All staff-only endpoints — order status updates, plus the admin
+  category, product, variant/inventory, order-list, and
+  customer-browsing APIs — are enforced with DRF's `IsAdminUser`
   permission
 
 ## Database
@@ -136,14 +156,39 @@ payment service is called, and no real payment processing occurs — status
 changes are made directly through the API for development/testing
 purposes.
 
+The customer frontend now includes a **Pay Now** action and a payment
+attempt status/history display on each order, using the `manual` provider
+value against this same endpoint. **It does not collect or process real
+card/payment details** — it only records a payment attempt and its
+status, exactly as described above.
+
 ## Planned / Upcoming Features
 
 - Real payment gateway integration (Razorpay/Stripe)
-- Frontend UI
 - Production PostgreSQL setup
 - Deployment
+- Automated frontend tests + CI/CD
 - NOSTRA StyleMatch
 - Virtual Wardrobe
+
+## Production Readiness Notes
+
+This project is **not** yet production-ready. Known gaps that should be
+addressed before any real deployment:
+
+- `DEBUG = True` is currently hardcoded in `config/settings.py` (not
+  environment-controlled), and `ALLOWED_HOSTS` is empty — both need
+  fixing together before deploying
+- No HTTPS/security-hardening settings are configured yet
+  (`SECURE_SSL_REDIRECT`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`,
+  HSTS)
+- No request rate-limiting/throttling on authentication endpoints
+- No refresh-token blacklist/rotation — logout only clears the token
+  client-side
+- No CI/CD pipeline (see [Testing](#testing))
+- SQLite is used for local development only; PostgreSQL is not yet
+  configured (see [Database](#database))
+- No real payment gateway integration — see [Payment](#payment)
 
 ## Installation / Local Setup (Windows)
 
@@ -172,6 +217,20 @@ python manage.py createsuperuser
 # Run the development server
 python manage.py runserver
 ```
+
+### Frontend setup
+
+```powershell
+cd frontend
+npm install
+copy .env.example .env.local
+npm run dev
+```
+
+The frontend dev server runs at `http://localhost:5173` and expects the
+backend running at `http://localhost:8000` (override via
+`VITE_API_BASE_URL` in `frontend/.env.local` — see
+`frontend/.env.example`).
 
 ## API Base URLs
 
