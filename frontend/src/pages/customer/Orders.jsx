@@ -16,6 +16,20 @@ function canCancelOrder(status) {
   return CANCELLABLE_STATUSES.includes(status)
 }
 
+// Mirrors PaymentCreateView's own eligibility checks (products/views.py):
+// ORDER_STATUSES_INELIGIBLE_FOR_PAYMENT (delivered/cancelled — the two
+// terminal statuses) can't accept a new payment attempt, and an order that
+// already has a `paid` payment can't either. This is a client-side mirror
+// purely to decide whether to show the Pay Now button — the backend
+// re-validates and rejects with 400 regardless of what the frontend shows,
+// so this never changes the actual payment eligibility rules.
+const PAYMENT_INELIGIBLE_STATUSES = ['delivered', 'cancelled']
+
+function canPayForOrder(order) {
+  if (PAYMENT_INELIGIBLE_STATUSES.includes(order.status)) return false
+  return !(order.payments ?? []).some((payment) => payment.status === 'paid')
+}
+
 // Page styles, scoped under `.orders-page`. Rendered through a <style> with
 // `href` + `precedence` so React 19 hoists it into the document head once.
 // Colors use light-dark() to follow the app's `color-scheme: light dark`,
@@ -242,6 +256,12 @@ function Orders() {
   const [cancelError, setCancelError] = useState('')
   const [cancelSuccess, setCancelSuccess] = useState('')
 
+  // Same pattern for the Pay Now action — kept separate from the cancel
+  // state above so the two actions' feedback never overwrites each other.
+  const [pendingPayId, setPendingPayId] = useState(null)
+  const [payError, setPayError] = useState('')
+  const [paySuccess, setPaySuccess] = useState('')
+
   useEffect(() => {
     if (!accessToken) return undefined
 
@@ -290,6 +310,41 @@ function Orders() {
     }
   }
 
+  async function handlePayNow(order) {
+    setPayError('')
+    setPaySuccess('')
+    setPendingPayId(order.id)
+    try {
+      // 'manual' is one of the backend's own accepted provider values
+      // (PAYMENT_PROVIDERS in products/views.py) — no real gateway is
+      // integrated here, this just records a payment attempt against the
+      // order for development/testing, exactly as the endpoint is designed
+      // to be used today.
+      await apiPost(ENDPOINTS.orderPay(order.id), { provider: 'manual' }, { accessToken })
+      // Re-fetch just this order rather than locally appending the new
+      // payment: starting an attempt also supersedes (cancels) any
+      // pending/processing attempt already on this order server-side, but
+      // the create response only describes the new payment, not that side
+      // effect. A fresh GET (merged into just this one row, not a full
+      // list refetch) is the only way to reflect every payment's true
+      // current status.
+      const refreshedOrder = await apiGet(ENDPOINTS.orderDetail(order.id), { accessToken })
+      setOrders((current) => current.map((o) => (o.id === order.id ? refreshedOrder : o)))
+      setPaySuccess(`Payment attempt recorded for order ${order.order_number}.`)
+    } catch (err) {
+      // A 400 here means the order stopped being eligible for a new
+      // payment attempt before this request completed — e.g. it was
+      // cancelled or delivered, or already paid, possibly by another
+      // action in flight at the same time. The backend's own message
+      // explains why, and the order's local state is left untouched, so
+      // nothing is ever shown as paid unless the backend actually
+      // confirms it.
+      setPayError(err.message || 'Unable to process payment for this order.')
+    } finally {
+      setPendingPayId(null)
+    }
+  }
+
   return (
     <>
       <Navbar />
@@ -319,6 +374,18 @@ function Orders() {
           </p>
         )}
 
+        {!isLoading && !error && payError && (
+          <p role="alert" className="orders-message">
+            {payError}
+          </p>
+        )}
+
+        {!isLoading && !error && paySuccess && (
+          <p role="status" className="orders-message">
+            {paySuccess}
+          </p>
+        )}
+
         {!isLoading && !error && orders.length === 0 && (
           <>
             <p className="orders-message orders-empty">You have not placed any orders yet.</p>
@@ -332,6 +399,7 @@ function Orders() {
           <ul className="order-list">
             {orders.map((order) => {
               const isCancelling = pendingCancelId === order.id
+              const isPaying = pendingPayId === order.id
 
               return (
                 <li key={order.id} className="order-list-item">
@@ -343,6 +411,16 @@ function Orders() {
                     <Link to={`/orders/${order.id}`} className="orders-button">
                       View Order
                     </Link>
+                    {canPayForOrder(order) && (
+                      <button
+                        type="button"
+                        className="orders-button"
+                        onClick={() => handlePayNow(order)}
+                        disabled={isPaying}
+                      >
+                        {isPaying ? 'Processing...' : 'Pay Now'}
+                      </button>
+                    )}
                     {canCancelOrder(order.status) && (
                       <button
                         type="button"

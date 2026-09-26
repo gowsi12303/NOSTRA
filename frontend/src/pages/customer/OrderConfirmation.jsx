@@ -16,6 +16,20 @@ function canCancelOrder(status) {
   return CANCELLABLE_STATUSES.includes(status)
 }
 
+// Mirrors PaymentCreateView's own eligibility checks (products/views.py):
+// ORDER_STATUSES_INELIGIBLE_FOR_PAYMENT (delivered/cancelled — the two
+// terminal statuses) can't accept a new payment attempt, and an order that
+// already has a `paid` payment can't either. This is a client-side mirror
+// purely to decide whether to show the Pay Now button — the backend
+// re-validates and rejects with 400 regardless of what the frontend shows,
+// so this never changes the actual payment eligibility rules.
+const PAYMENT_INELIGIBLE_STATUSES = ['delivered', 'cancelled']
+
+function canPayForOrder(order) {
+  if (PAYMENT_INELIGIBLE_STATUSES.includes(order.status)) return false
+  return !(order.payments ?? []).some((payment) => payment.status === 'paid')
+}
+
 // Page styles, scoped under `.order-page`. Rendered through a <style> with
 // `href` + `precedence` so React 19 hoists it into the document head once.
 // Colors use light-dark() to follow the app's `color-scheme: light dark`,
@@ -114,9 +128,10 @@ const orderConfirmationStyles = `
     white-space: nowrap;
   }
 
-  /* Shipping address and items, each a card. */
+  /* Shipping address, items, and payment, each a card. */
   .order-page .order-shipping-section,
-  .order-page .order-items-section {
+  .order-page .order-items-section,
+  .order-page .order-payments-section {
     margin-bottom: 24px;
     padding: 24px 20px;
     border: 1px solid light-dark(#e5e5e5, #333333);
@@ -125,7 +140,8 @@ const orderConfirmationStyles = `
   }
 
   .order-page .order-shipping-section h2,
-  .order-page .order-items-section h2 {
+  .order-page .order-items-section h2,
+  .order-page .order-payments-section h2 {
     margin: 0 0 16px;
     font-size: 0.8rem;
     font-weight: 500;
@@ -287,6 +303,52 @@ const orderConfirmationStyles = `
     cursor: pointer;
   }
 
+  .order-page .order-pay-button {
+    margin: 0 0 16px;
+    font: inherit;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+  }
+
+  .order-page .order-payment-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .order-page .order-payment-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    padding: 12px 0;
+    border-top: 1px solid light-dark(#e5e5e5, #333333);
+    font-size: 0.9rem;
+  }
+
+  .order-page .order-payment-row:first-child {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .order-page .order-payment-provider {
+    font-weight: 500;
+    text-transform: capitalize;
+  }
+
+  .order-page .order-payment-amount {
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .order-page .order-payment-date {
+    margin-left: auto;
+    opacity: 0.7;
+    white-space: nowrap;
+  }
+
   @media (max-width: 600px) {
     .order-page {
       padding: 24px 16px 48px;
@@ -374,6 +436,12 @@ function OrderConfirmation() {
   const [cancelError, setCancelError] = useState('')
   const [cancelSuccess, setCancelSuccess] = useState('')
 
+  // Same pattern for the Pay Now action — kept separate from the cancel
+  // state above so the two actions' feedback never overwrites each other.
+  const [isPaying, setIsPaying] = useState(false)
+  const [payError, setPayError] = useState('')
+  const [paySuccess, setPaySuccess] = useState('')
+
   useEffect(() => {
     if (!accessToken) return undefined
 
@@ -415,6 +483,41 @@ function OrderConfirmation() {
       setCancelError(err.message || 'Unable to cancel this order.')
     } finally {
       setIsCancelling(false)
+    }
+  }
+
+  async function handlePayNow() {
+    setPayError('')
+    setPaySuccess('')
+    setIsPaying(true)
+    try {
+      // 'manual' is one of the backend's own accepted provider values
+      // (PAYMENT_PROVIDERS in products/views.py) — no real gateway is
+      // integrated here, this just records a payment attempt against the
+      // order for development/testing, exactly as the endpoint is designed
+      // to be used today.
+      await apiPost(ENDPOINTS.orderPay(order.id), { provider: 'manual' }, { accessToken })
+      // Re-fetch the order rather than locally appending the new payment:
+      // starting an attempt also supersedes (cancels) any pending/
+      // processing attempt already on this order server-side, but the
+      // create response only describes the new payment, not that
+      // side effect — a plain append would leave a stale "pending" badge
+      // on the one that just got superseded. A fresh GET is the only way
+      // to reflect every payment's true current status.
+      const refreshedOrder = await apiGet(ENDPOINTS.orderDetail(order.id), { accessToken })
+      setOrder(refreshedOrder)
+      setPaySuccess('Payment attempt recorded.')
+    } catch (err) {
+      // A 400 here means the order stopped being eligible for a new
+      // payment attempt before this request completed — e.g. it was
+      // cancelled or delivered, or already paid, possibly by another
+      // action in flight at the same time. The backend's own message
+      // explains why, and the order's local state is left untouched, so
+      // nothing is ever shown as paid unless the backend actually
+      // confirms it.
+      setPayError(err.message || 'Unable to process payment for this order.')
+    } finally {
+      setIsPaying(false)
     }
   }
 
@@ -522,6 +625,51 @@ function OrderConfirmation() {
               </ul>
 
               <p className="cart-total">Total: ₹{Number(order.total_amount)}</p>
+            </section>
+
+            <section className="order-payments-section">
+              <h2>Payment</h2>
+
+              {payError && (
+                <p role="alert" className="order-message">
+                  {payError}
+                </p>
+              )}
+              {paySuccess && (
+                <p role="status" className="order-message">
+                  {paySuccess}
+                </p>
+              )}
+
+              {canPayForOrder(order) && (
+                <button
+                  type="button"
+                  className="order-button order-button-outline order-pay-button"
+                  onClick={handlePayNow}
+                  disabled={isPaying}
+                >
+                  {isPaying ? 'Processing...' : 'Pay Now'}
+                </button>
+              )}
+
+              {order.payments && order.payments.length > 0 ? (
+                <ul className="order-payment-list">
+                  {order.payments.map((payment) => (
+                    <li key={payment.id} className="order-payment-row">
+                      <span className="order-payment-provider">{payment.provider}</span>
+                      <span className="order-status">{payment.status}</span>
+                      <span className="order-payment-amount">
+                        {payment.currency} {payment.amount}
+                      </span>
+                      <span className="order-payment-date">
+                        {new Date(payment.created_at).toLocaleString()}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="order-message">No payment attempts yet.</p>
+              )}
             </section>
 
             <Link to="/products" className="order-button">
