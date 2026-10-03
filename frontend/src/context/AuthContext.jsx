@@ -1,39 +1,14 @@
 import { createContext, useEffect, useState } from 'react'
-import { getCurrentUser, loginUser, registerUser } from '../api/auth'
+import { getCurrentUser, loginUser, logoutUser, registerUser } from '../api/auth'
+import { subscribeToSession } from '../api/client'
+import {
+  clearStoredTokens,
+  getStoredAccessToken,
+  getStoredRefreshToken,
+  storeTokens,
+} from '../api/tokenStorage'
 
 export const AuthContext = createContext(undefined)
-
-const ACCESS_TOKEN_KEY = 'nostra_access_token'
-const REFRESH_TOKEN_KEY = 'nostra_refresh_token'
-
-function readStoredToken(key) {
-  try {
-    return localStorage.getItem(key)
-  } catch {
-    // localStorage can throw (private browsing, disabled storage, etc.) —
-    // treat that the same as "no token stored".
-    return null
-  }
-}
-
-function storeTokens({ access, refresh }) {
-  try {
-    localStorage.setItem(ACCESS_TOKEN_KEY, access)
-    localStorage.setItem(REFRESH_TOKEN_KEY, refresh)
-  } catch {
-    // Ignore storage failures — the tokens still work for the current
-    // in-memory session, they just won't survive a page reload.
-  }
-}
-
-function clearStoredTokens() {
-  try {
-    localStorage.removeItem(ACCESS_TOKEN_KEY)
-    localStorage.removeItem(REFRESH_TOKEN_KEY)
-  } catch {
-    // Nothing more we can do if localStorage itself is unavailable.
-  }
-}
 
 /**
  * Provides authentication state/actions to the whole app. Restores a
@@ -42,9 +17,11 @@ function clearStoredTokens() {
  * exposes login/register/logout plus the derived user/isAuthenticated/
  * isStaff flags every page needs.
  *
- * No token-refresh/retry logic here yet (see api/auth.js) — a stored
- * access token that's expired or otherwise invalid is simply treated as
- * "not logged in" for now; that's deferred to a later step.
+ * Token refresh itself happens in api/client.js: any authenticated
+ * request that gets a 401 refreshes the token pair once and retries.
+ * This provider only listens for the outcome (see subscribeToSession
+ * below) so its state follows the rotated access token, or drops to
+ * logged-out when the refresh token is no longer accepted.
  */
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
@@ -61,8 +38,19 @@ export function AuthProvider({ children }) {
   // a valid session.
   const [isLoading, setIsLoading] = useState(true)
 
+  useEffect(
+    () =>
+      // client.js reports every refresh outcome: a new access token after
+      // a successful rotation, or null once the session can't be renewed.
+      subscribeToSession((newAccessToken) => {
+        setAccessTokenState(newAccessToken)
+        if (!newAccessToken) setUser(null)
+      }),
+    [],
+  )
+
   useEffect(() => {
-    const storedAccessToken = readStoredToken(ACCESS_TOKEN_KEY)
+    const storedAccessToken = getStoredAccessToken()
     if (!storedAccessToken) {
       setIsLoading(false)
       return
@@ -70,22 +58,26 @@ export function AuthProvider({ children }) {
 
     let cancelled = false
 
+    // An expired stored access token is refreshed transparently inside
+    // this call, as long as the stored refresh token is still valid.
     getCurrentUser(storedAccessToken)
       .then((currentUser) => {
         if (!cancelled) {
           setUser(currentUser)
-          setAccessTokenState(storedAccessToken)
+          // Read back from storage: the token may have just been rotated.
+          setAccessTokenState(getStoredAccessToken() ?? storedAccessToken)
         }
       })
-      .catch(() => {
-        // Stored access token is missing/expired/invalid. Drop the stale
-        // session rather than leaving the app looking authenticated when
-        // it isn't.
-        if (!cancelled) {
-          clearStoredTokens()
-          setUser(null)
-          setAccessTokenState(null)
-        }
+      .catch((error) => {
+        if (cancelled) return
+        // A 401 here means the refresh attempt failed too, so the stored
+        // session is dead — drop it rather than leaving the app looking
+        // authenticated when it isn't. Any other failure (server
+        // unreachable, 5xx) says nothing about the tokens, so they are
+        // kept for the next page load.
+        if (error.status === 401) clearStoredTokens()
+        setUser(null)
+        setAccessTokenState(null)
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false)
@@ -117,10 +109,24 @@ export function AuthProvider({ children }) {
     return result
   }
 
-  function logout() {
+  async function logout() {
+    const refreshToken = getStoredRefreshToken()
+
+    // Local logout happens first and unconditionally, so it never waits
+    // on — or depends on — the server.
     clearStoredTokens()
     setUser(null)
     setAccessTokenState(null)
+
+    if (!refreshToken) return
+    try {
+      // Blacklist the refresh token server-side so it can't be reused.
+      await logoutUser(refreshToken)
+    } catch {
+      // Token already invalid/expired, or the server is unreachable —
+      // nothing left to revoke from here; the local session is gone
+      // either way.
+    }
   }
 
   const value = {

@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import User
 
@@ -162,6 +165,146 @@ class TokenRefreshAPITests(APITestCase):
         # this on its own.
         anonymous_client = self.client_class()
         response = anonymous_client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class TokenRotationAPITests(APITestCase):
+    """POST /api/accounts/token/refresh/ — refresh-token rotation: each
+    refresh token is single-use."""
+
+    url = '/api/accounts/token/refresh/'
+    login_url = '/api/accounts/login/'
+    username = 'rotationuser'
+    password = 'NostraTest@2026!'
+
+    def setUp(self):
+        User.objects.create_user(
+            username=self.username,
+            email='rotationuser@nostra.com',
+            password=self.password,
+        )
+        login_response = self.client.post(
+            self.login_url,
+            {'username': self.username, 'password': self.password},
+            format='json',
+        )
+        self.refresh = login_response.data['refresh']
+
+    def test_refresh_returns_a_new_refresh_token(self):
+        response = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('refresh', response.data)
+        self.assertTrue(response.data['refresh'])
+        self.assertNotEqual(response.data['refresh'], self.refresh)
+
+    def test_old_refresh_token_is_rejected_after_rotation(self):
+        self.client.post(self.url, {'refresh': self.refresh}, format='json')
+
+        replay = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(replay.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertNotIn('access', replay.data)
+
+    def test_rotated_refresh_token_can_be_used_once(self):
+        first = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        rotated = first.data['refresh']
+
+        second = self.client.post(self.url, {'refresh': rotated}, format='json')
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(second.data['refresh'], rotated)
+
+
+class LogoutAPITests(APITestCase):
+    """POST /api/accounts/logout/ — server-side logout: blacklists the
+    supplied refresh token."""
+
+    url = '/api/accounts/logout/'
+    login_url = '/api/accounts/login/'
+    refresh_url = '/api/accounts/token/refresh/'
+    username = 'logoutuser'
+    password = 'NostraTest@2026!'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username=self.username,
+            email='logoutuser@nostra.com',
+            password=self.password,
+        )
+        login_response = self.client.post(
+            self.login_url,
+            {'username': self.username, 'password': self.password},
+            format='json',
+        )
+        self.access = login_response.data['access']
+        self.refresh = login_response.data['refresh']
+
+    def test_logout_returns_200_without_echoing_tokens(self):
+        response = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('refresh', response.data)
+        self.assertNotIn('access', response.data)
+        self.assertNotIn(self.refresh, response.content.decode())
+
+    def test_logged_out_refresh_token_cannot_be_refreshed(self):
+        self.client.post(self.url, {'refresh': self.refresh}, format='json')
+
+        response = self.client.post(self.refresh_url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_logout_twice_with_same_token_returns_401(self):
+        self.client.post(self.url, {'refresh': self.refresh}, format='json')
+
+        response = self.client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_missing_refresh_field_returns_400(self):
+        response = self.client.post(self.url, {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_malformed_token_returns_401(self):
+        response = self.client.post(self.url, {'refresh': 'not-a-real-token'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertNotIn('not-a-real-token', response.content.decode())
+
+    def test_access_token_is_not_accepted_as_refresh_token(self):
+        response = self.client.post(self.url, {'refresh': self.access}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_expired_refresh_token_returns_401(self):
+        expired = RefreshToken.for_user(self.user)
+        expired.set_exp(lifetime=-timedelta(minutes=1))
+
+        response = self.client.post(self.url, {'refresh': str(expired)}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_no_authorization_header_required(self):
+        # Same reasoning as the refresh endpoint: the refresh token is the
+        # credential, so a client with an expired access token can still
+        # log out.
+        anonymous_client = self.client_class()
+        response = anonymous_client.post(self.url, {'refresh': self.refresh}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_access_token_still_authenticates_after_logout(self):
+        # Access tokens are stateless: logout revokes the refresh token
+        # only, the access token stays valid until its own expiry.
+        self.client.post(self.url, {'refresh': self.refresh}, format='json')
+
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.access}')
+        response = self.client.get('/api/accounts/me/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['username'], self.username)
+
+    def test_logout_does_not_revoke_other_sessions(self):
+        other_login = self.client.post(
+            self.login_url,
+            {'username': self.username, 'password': self.password},
+            format='json',
+        )
+        self.client.post(self.url, {'refresh': self.refresh}, format='json')
+
+        response = self.client.post(
+            self.refresh_url, {'refresh': other_login.data['refresh']}, format='json',
+        )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
 

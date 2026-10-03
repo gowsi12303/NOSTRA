@@ -17,9 +17,19 @@ Including another URLconf
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
+from django.http import JsonResponse
 from django.urls import include, path
 
+
+def health(request):
+    """Liveness probe for load balancers / hosting platforms: answers 200
+    whenever Django is up and routing requests. Deliberately touches
+    nothing else (no database, no auth) and reveals nothing."""
+    return JsonResponse({'status': 'ok'})
+
+
 urlpatterns = [
+    path('health/', health, name='health'),
     path('admin/', admin.site.urls),
     path('api/accounts/', include('accounts.urls')),
     path('api/products/', include('products.urls')),

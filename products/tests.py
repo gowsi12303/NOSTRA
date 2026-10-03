@@ -1,11 +1,14 @@
 import shutil
 import tempfile
 from decimal import Decimal
+from io import BytesIO
+from pathlib import Path
 
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.files.storage import FileSystemStorage, default_storage, storages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
 from django.db.models.deletion import ProtectedError
@@ -14,8 +17,10 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import resolve
 from django.views.static import serve as static_serve
 from rest_framework import status
+from PIL import Image
 from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
 
+from .admin import ProductImageAdminForm
 from .models import (
     Address,
     Cart,
@@ -4438,3 +4443,111 @@ class CorsConfigurationTests(APITestCase):
     def test_cors_allow_all_origins_is_not_enabled(self):
         from django.conf import settings as django_settings
         self.assertFalse(getattr(django_settings, 'CORS_ALLOW_ALL_ORIGINS', False))
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class MediaStorageTests(APITestCase):
+    """Uploaded media and static files use separate storages: media on
+    the configurable 'default' storage (local filesystem unless
+    MEDIA_STORAGE_BACKEND says otherwise), static files on WhiteNoise."""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEST_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        self.category = Category.objects.create(name='Gadgets')
+        self.product = Product.objects.create(
+            name='Camera',
+            description='A camera',
+            price='199.99',
+            category=self.category,
+        )
+
+    def create_image(self, name='camera.gif'):
+        return ProductImage.objects.create(
+            product=self.product,
+            image=SimpleUploadedFile(name, TINY_GIF, content_type='image/gif'),
+        )
+
+    def test_media_storage_defaults_to_local_filesystem(self):
+        self.assertIsInstance(storages['default'], FileSystemStorage)
+        self.assertIs(ProductImage._meta.get_field('image').storage, default_storage)
+
+    def test_static_storage_is_whitenoise(self):
+        self.assertEqual(
+            settings.STORAGES['staticfiles']['BACKEND'],
+            'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        )
+
+    def test_media_and_static_storage_are_separate(self):
+        self.assertNotEqual(
+            settings.STORAGES['default']['BACKEND'],
+            settings.STORAGES['staticfiles']['BACKEND'],
+        )
+        self.assertNotEqual(Path(settings.MEDIA_ROOT), Path(settings.STATIC_ROOT))
+        self.assertNotEqual(settings.MEDIA_URL, settings.STATIC_URL)
+
+    def test_upload_is_stored_under_media_root(self):
+        image = self.create_image()
+        stored_path = Path(image.image.path).resolve()
+        self.assertTrue(stored_path.is_file())
+        self.assertEqual(stored_path.parent, (Path(TEST_MEDIA_ROOT) / 'products').resolve())
+        self.assertTrue(image.image.name.startswith('products/'))
+
+    def test_api_returns_absolute_media_url_for_image(self):
+        image = self.create_image()
+        response = self.client.get(f'/api/products/{self.product.id}/')
+        self.assertEqual(
+            response.data['images'][0]['image'],
+            f'http://testserver/media/{image.image.name}',
+        )
+
+    def test_upload_filename_cannot_escape_media_root(self):
+        image = self.create_image(name='../../../escape.gif')
+        stored_path = Path(image.image.path).resolve()
+        self.assertEqual(stored_path.parent, (Path(TEST_MEDIA_ROOT) / 'products').resolve())
+        self.assertNotIn('..', image.image.name)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class ProductImageAdminFormTests(APITestCase):
+    """Upload validation on the admin product-image form."""
+
+    def setUp(self):
+        category = Category.objects.create(name='Gadgets')
+        self.product = Product.objects.create(
+            name='Camera',
+            description='A camera',
+            price='199.99',
+            category=category,
+        )
+
+    def make_form(self, upload):
+        return ProductImageAdminForm(
+            data={'product': self.product.id, 'alt_text': 'A camera photo'},
+            files={'image': upload},
+        )
+
+    def test_valid_image_is_accepted(self):
+        form = self.make_form(SimpleUploadedFile('camera.gif', TINY_GIF, content_type='image/gif'))
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_oversized_image_is_rejected(self):
+        with override_settings(PRODUCT_IMAGE_MAX_UPLOAD_BYTES=len(TINY_GIF) - 1):
+            form = self.make_form(SimpleUploadedFile('camera.gif', TINY_GIF, content_type='image/gif'))
+            self.assertFalse(form.is_valid())
+        self.assertIn('too large', form.errors['image'][0])
+
+    def test_unsupported_image_format_is_rejected(self):
+        buffer = BytesIO()
+        Image.new('RGB', (1, 1)).save(buffer, format='BMP')
+        form = self.make_form(SimpleUploadedFile('camera.bmp', buffer.getvalue(), content_type='image/bmp'))
+        self.assertFalse(form.is_valid())
+        self.assertIn('Unsupported image format', form.errors['image'][0])
+
+    def test_non_image_file_is_rejected(self):
+        form = self.make_form(SimpleUploadedFile('camera.jpg', b'not an image', content_type='image/jpeg'))
+        self.assertFalse(form.is_valid())
+        self.assertIn('image', form.errors)

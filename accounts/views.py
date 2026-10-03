@@ -13,11 +13,13 @@ from .serializers import CurrentUserSerializer, CustomerSerializer, RegisterSeri
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    throttle_scope = 'register'
 
 
 class LoginView(TokenObtainPairView):
     """Accepts username/password and returns JWT access + refresh tokens."""
     permission_classes = [AllowAny]
+    throttle_scope = 'login'
 
 
 class CurrentUserView(generics.RetrieveAPIView):

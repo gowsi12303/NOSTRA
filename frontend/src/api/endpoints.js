@@ -20,6 +20,7 @@ export const ENDPOINTS = {
   register: '/api/accounts/register/',
   login: '/api/accounts/login/',
   tokenRefresh: '/api/accounts/token/refresh/',
+  logout: '/api/accounts/logout/',
   currentUser: '/api/accounts/me/',
 
   // Catalog (public, see products/urls.py)

@@ -1,7 +1,9 @@
 // Thin auth endpoint helpers, built on client.js + endpoints.js. No token
 // storage or refresh/retry logic lives here — this module only knows how
-// to make the four requests themselves; AuthContext (a later step) is
-// responsible for what happens with the tokens it gets back.
+// to make the four requests themselves; AuthContext is responsible for
+// what happens with the tokens it gets back. Token refresh is not one of
+// them: it lives in client.js (refreshSession), next to the 401 retry
+// that drives it.
 
 import { apiGet, apiPost } from './client'
 import { ENDPOINTS } from './endpoints'
@@ -25,12 +27,14 @@ export function loginUser(data) {
 }
 
 /**
- * Exchange a refresh token for a new access token.
+ * Server-side logout: blacklists the refresh token so it can never be
+ * used again. Needs no access token — the refresh token is the
+ * credential.
  * @param {string} refreshToken
- * @returns {Promise<{ access: string }>}
+ * @returns {Promise<object>}
  */
-export function refreshAccessToken(refreshToken) {
-  return apiPost(ENDPOINTS.tokenRefresh, { refresh: refreshToken })
+export function logoutUser(refreshToken) {
+  return apiPost(ENDPOINTS.logout, { refresh: refreshToken })
 }
 
 /**

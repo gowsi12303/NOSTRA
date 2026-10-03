@@ -1,5 +1,5 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
 
 from .views import (
     CurrentUserView,
@@ -16,6 +16,12 @@ urlpatterns = [
     # new access token. Accessible without an access-token Authorization
     # header (AllowAny is DRF's default here, same as LoginView).
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
+    # SimpleJWT's own, unmodified view — blacklists the refresh token in
+    # the request body so it can never be used again. Like the refresh
+    # endpoint it needs no Authorization header: the refresh token is the
+    # credential, so a client whose access token already expired can
+    # still log out.
+    path('logout/', TokenBlacklistView.as_view(), name='logout'),
     path('me/', CurrentUserView.as_view(), name='current-user'),
     path('admin/customers/', CustomerListAdminView.as_view(), name='customer-list-admin'),
     path('admin/customers/<int:pk>/', CustomerDetailAdminView.as_view(), name='customer-detail-admin'),

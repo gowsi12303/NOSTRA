@@ -733,10 +733,13 @@ class OrderPlaceView(generics.GenericAPIView):
                 variant_ids = sorted({item.variant_id for item in cart_items})
                 # Lock every involved variant row, in a fixed (pk) order, so
                 # two concurrent checkouts touching overlapping variants
-                # never deadlock each other.
+                # never deadlock each other. of=('self',) locks the
+                # variant rows only: size/color are nullable joins, and
+                # PostgreSQL refuses a plain FOR UPDATE across the
+                # nullable side of an outer join.
                 variants = {
                     variant.id: variant
-                    for variant in ProductVariant.objects.select_for_update()
+                    for variant in ProductVariant.objects.select_for_update(of=('self',))
                     .select_related('product', 'size', 'color')
                     .filter(pk__in=variant_ids)
                     .order_by('pk')

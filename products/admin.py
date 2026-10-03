@@ -1,4 +1,5 @@
 from django import forms
+from django.conf import settings
 from django.contrib import admin
 
 from .models import (
@@ -26,8 +27,40 @@ class CategoryAdmin(admin.ModelAdmin):
     search_fields = ('name', 'description')
 
 
+# Web image formats a product photo may be uploaded in. ImageField already
+# proves the file is a real image (Pillow); this narrows "any format
+# Pillow can open" down to the ones a storefront actually needs.
+ALLOWED_PRODUCT_IMAGE_FORMATS = {'JPEG', 'PNG', 'WEBP', 'GIF'}
+
+
+class ProductImageAdminForm(forms.ModelForm):
+    """Upload limits for product images. Lives on the admin form — the
+    only upload path — rather than on the model field, so it needs no
+    migration."""
+
+    class Meta:
+        model = ProductImage
+        fields = '__all__'
+
+    def clean_image(self):
+        image = self.cleaned_data.get('image')
+        # Only a fresh upload carries the Pillow image; an unchanged
+        # existing file (editing other fields) is left alone.
+        uploaded = getattr(image, 'image', None)
+        if uploaded is None:
+            return image
+
+        if image.size > settings.PRODUCT_IMAGE_MAX_UPLOAD_BYTES:
+            limit_mb = settings.PRODUCT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
+            raise forms.ValidationError(f'Image file too large (maximum {limit_mb} MB).')
+        if uploaded.format not in ALLOWED_PRODUCT_IMAGE_FORMATS:
+            raise forms.ValidationError('Unsupported image format. Use JPEG, PNG, WebP or GIF.')
+        return image
+
+
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
+    form = ProductImageAdminForm
     extra = 0
 
 
@@ -61,6 +94,7 @@ class ProductAdmin(admin.ModelAdmin):
 
 @admin.register(ProductImage)
 class ProductImageAdmin(admin.ModelAdmin):
+    form = ProductImageAdminForm
     list_display = ('product', 'alt_text', 'is_primary', 'created_at')
     list_filter = ('is_primary',)
     search_fields = ('product__name', 'alt_text')

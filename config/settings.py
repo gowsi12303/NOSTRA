@@ -10,6 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import sys
+from datetime import timedelta
 from pathlib import Path
 
 import environ
@@ -22,8 +24,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env()
 environ.Env.read_env(BASE_DIR / '.env')
 
+# True under `manage.py test`. Used only to relax settings that would
+# otherwise drown or throttle the test suite (rate limits, log level).
+RUNNING_TESTS = 'test' in sys.argv[1:2]
 
-# Quick-start development settings - unsuitable for production
+
+# Core settings — all environment-driven (see .env.example)
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
@@ -31,9 +37,68 @@ environ.Env.read_env(BASE_DIR / '.env')
 SECRET_KEY = env('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Defaults to False so a missing variable fails safe; set DEBUG=True in
+# the local .env for development.
+DEBUG = env.bool('DEBUG', default=False)
 
-ALLOWED_HOSTS = []
+# Comma-separated hostnames this site may serve. Required whenever DEBUG
+# is False; with DEBUG=True and an empty list Django still accepts
+# localhost / 127.0.0.1 / [::1].
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=[])
+
+# Comma-separated origins (scheme included, e.g. https://admin.example.com)
+# trusted for unsafe requests such as the /admin/ login behind HTTPS.
+CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
+
+# On Render, every web service gets RENDER_EXTERNAL_HOSTNAME (its
+# <name>.onrender.com host) set automatically. Trusting it here means the
+# service answers on its own Render URL — which is also the Host header
+# Render's health check sends — without that URL being hardcoded
+# anywhere. Custom domains still go in ALLOWED_HOSTS /
+# CSRF_TRUSTED_ORIGINS. Absent everywhere else, so this is a no-op locally.
+RENDER_EXTERNAL_HOSTNAME = env.str('RENDER_EXTERNAL_HOSTNAME', default='')
+if RENDER_EXTERNAL_HOSTNAME:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+    CSRF_TRUSTED_ORIGINS.append(f'https://{RENDER_EXTERNAL_HOSTNAME}')
+
+
+# HTTPS / transport security
+# https://docs.djangoproject.com/en/6.1/topics/security/#ssl-https
+#
+# Everything here is switched on from the environment, so production can
+# enable full HTTPS hardening without touching this file (see .env.example).
+#
+# The redirect and HSTS are explicit opt-ins rather than derived from
+# DEBUG: the test runner forces DEBUG=False, so tying them to it would
+# turn every test request into a 301. Enable both in production only.
+SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=False)
+
+# The health probe is the one path never redirected: platform health
+# checks usually arrive over plain HTTP from inside the network and treat
+# a 301 as a failure. It returns a fixed {"status": "ok"}, nothing more.
+SECURE_REDIRECT_EXEMPT = [r'^health/$']
+
+# HSTS is opt-in and never hardcoded: browsers cache the policy for the
+# full max-age, so it cannot be taken back once served. includeSubDomains
+# and preload widen that commitment to every subdomain / the browsers'
+# built-in list, so each is its own opt-in and off by default. Both are
+# ignored while SECURE_HSTS_SECONDS is 0.
+SECURE_HSTS_SECONDS = env.int('SECURE_HSTS_SECONDS', default=0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=False)
+SECURE_HSTS_PRELOAD = env.bool('SECURE_HSTS_PRELOAD', default=False)
+
+# Secure-only cookies whenever DEBUG is off; overridable for a
+# DEBUG=False run over plain HTTP.
+SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=not DEBUG)
+CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=not DEBUG)
+
+# Only trust X-Forwarded-Proto when the app really sits behind a proxy
+# that sets/strips it — otherwise a client could spoof a secure request.
+# Required behind an HTTPS-terminating proxy when SECURE_SSL_REDIRECT is
+# on: without it Django sees every proxied request as plain HTTP and
+# redirects forever.
+if env.bool('USE_PROXY_SSL_HEADER', default=False):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -48,6 +113,7 @@ INSTALLED_APPS = [
 
 'corsheaders',
 'rest_framework',
+'rest_framework_simplejwt.token_blacklist',
 'django_filters',
 'accounts',
 'products',
@@ -55,6 +121,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves collected static files (admin CSS/JS) in production. Must sit
+    # directly after SecurityMiddleware, above everything else.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -87,12 +156,25 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
+# Selected by DATABASE_URL (e.g. postgres://... in production). When it
+# is unset, falls back to the local SQLite file, so development and the
+# test suite need no database server.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': env.db(
+        'DATABASE_URL',
+        default=f"sqlite:///{(BASE_DIR / 'db.sqlite3').as_posix()}",
+    ),
 }
+
+# Seconds a connection is kept open for reuse. 0 (the default) closes it
+# after every request, which is what SQLite/local development wants.
+DATABASES['default']['CONN_MAX_AGE'] = env.int('CONN_MAX_AGE', default=0)
+
+# Check a reused connection is still alive before each request uses it,
+# so one dropped by the server or a proxy is replaced instead of failing
+# the request. Only has an effect when CONN_MAX_AGE keeps connections
+# open; with the default of 0 there is nothing to check.
+DATABASES['default']['CONN_HEALTH_CHECKS'] = env.bool('CONN_HEALTH_CHECKS', default=True)
 
 
 # Password validation
@@ -131,21 +213,151 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Where `collectstatic` gathers files for production; WhiteNoise serves
+# them from here. Generated output — gitignored, never edited by hand.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# Two independent storages. 'staticfiles' is the app's own assets, served
+# by WhiteNoise with compressed, hashed filenames. 'default' is uploaded
+# media (product images) and is deliberately never handled by WhiteNoise.
+#
+# The media backend is chosen by environment so production can move
+# uploads to persistent storage without touching models or this file:
+# MEDIA_STORAGE_BACKEND is the dotted path of any Django storage class,
+# MEDIA_STORAGE_OPTIONS a JSON object of keyword arguments for it. The
+# default is the local filesystem (MEDIA_ROOT / MEDIA_URL below). No
+# provider is assumed or bundled — see .env.example.
+# (`or`: a variable that exists but is blank — e.g. left empty in a host's
+# dashboard — counts as unset.)
+MEDIA_STORAGE_BACKEND = (
+    env.str('MEDIA_STORAGE_BACKEND', default='')
+    or 'django.core.files.storage.FileSystemStorage'
+)
+MEDIA_STORAGE_OPTIONS = env.json('MEDIA_STORAGE_OPTIONS', default={})
+
+# S3-compatible object storage (django-storages), for hosts whose disk
+# does not survive a deploy. Works with any S3-compatible provider — the
+# S3_* variables are deliberately provider-neutral, and S3_ENDPOINT_URL is
+# what points it at a non-AWS one. Anything in MEDIA_STORAGE_OPTIONS still
+# overrides these.
+if MEDIA_STORAGE_BACKEND == 'storages.backends.s3.S3Storage':
+    MEDIA_STORAGE_OPTIONS = {
+        'bucket_name': env.str('S3_BUCKET_NAME'),
+        'access_key': env.str('S3_ACCESS_KEY_ID'),
+        'secret_key': env.str('S3_SECRET_ACCESS_KEY'),
+        'endpoint_url': env.str('S3_ENDPOINT_URL', default='') or None,
+        'region_name': env.str('S3_REGION_NAME', default='') or None,
+        # Public host that serves the bucket (CDN / public bucket domain),
+        # without scheme. When set, image URLs are plain links on it.
+        'custom_domain': env.str('S3_CUSTOM_DOMAIN', default='') or None,
+        # True: time-limited signed URLs, so the bucket can stay private.
+        # False: plain URLs, which need a publicly readable bucket/domain.
+        'querystring_auth': env.bool('S3_QUERYSTRING_AUTH', default=True),
+        # Never replace an existing object when a filename repeats — same
+        # behaviour as local filesystem storage.
+        'file_overwrite': False,
+        **MEDIA_STORAGE_OPTIONS,
+    }
+
+STORAGES = {
+    'default': {
+        'BACKEND': MEDIA_STORAGE_BACKEND,
+        'OPTIONS': MEDIA_STORAGE_OPTIONS,
+    },
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
+
 
 # Media files (user-uploaded content, e.g. product images)
 # https://docs.djangoproject.com/en/6.1/topics/files/
 
-MEDIA_URL = 'media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# Used by the filesystem media storage (the default backend above).
+# MEDIA_ROOT is where uploads are written: the project's media/ directory
+# locally, or a persistent volume's path in production. MEDIA_URL is the
+# public prefix of their URLs. Django only serves these files itself
+# while DEBUG is on (see config/urls.py); in production the web server /
+# proxy must serve MEDIA_ROOT at MEDIA_URL, or a remote storage backend
+# supplies its own URLs and both settings go unused.
+MEDIA_URL = env.str('MEDIA_URL', default='media/')
+MEDIA_ROOT = Path(env.str('MEDIA_ROOT', default=str(BASE_DIR / 'media')))
+
+# Largest product image accepted through the admin upload form.
+PRODUCT_IMAGE_MAX_UPLOAD_BYTES = env.int('PRODUCT_IMAGE_MAX_UPLOAD_MB', default=5) * 1024 * 1024
 
 
 # Django REST Framework
 # https://www.django-rest-framework.org/api-guide/settings/
 
+# The browsable HTML API is a development convenience; production should
+# answer JSON only. Follows DEBUG unless DRF_BROWSABLE_API is set.
+DRF_RENDERER_CLASSES = ['rest_framework.renderers.JSONRenderer']
+if env.bool('DRF_BROWSABLE_API', default=DEBUG):
+    DRF_RENDERER_CLASSES.append('rest_framework.renderers.BrowsableAPIRenderer')
+
+# Throttle rates ("<count>/<second|minute|hour|day>"), tunable per
+# environment. 'anon' is keyed by client IP, 'user' by account; 'login'
+# and 'register' are stricter per-endpoint scopes (see throttle_scope on
+# accounts.views.LoginView / RegisterView).
+DRF_THROTTLE_RATES = {
+    'anon': env.str('THROTTLE_RATE_ANON', default='100/minute'),
+    'user': env.str('THROTTLE_RATE_USER', default='300/minute'),
+    'login': env.str('THROTTLE_RATE_LOGIN', default='10/minute'),
+    'register': env.str('THROTTLE_RATE_REGISTER', default='10/hour'),
+}
+
+# The test suite fires hundreds of requests (and logins) from one client
+# in seconds, so rate limits are switched off under `manage.py test` only
+# — a rate of None means "no limit" to DRF. Nothing else changes: the
+# throttle classes and scopes stay configured exactly as in production.
+if RUNNING_TESTS:
+    DRF_THROTTLE_RATES = dict.fromkeys(DRF_THROTTLE_RATES)
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    # Locked by default: a view is public only if it says so itself with
+    # permission_classes = [AllowAny].
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
+    'DEFAULT_RENDERER_CLASSES': DRF_RENDERER_CLASSES,
+    # ScopedRateThrottle only acts on views that declare a throttle_scope.
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': DRF_THROTTLE_RATES,
+    # Number of trusted reverse proxies in front of the app, used to pick
+    # the real client IP out of X-Forwarded-For for IP-keyed throttles.
+    # None (unset) keeps DRF's default behaviour.
+    'NUM_PROXIES': env.int('NUM_PROXIES', default=None),
+}
+
+
+# JWT (djangorestframework-simplejwt)
+# https://django-rest-framework-simplejwt.readthedocs.io/en/latest/settings.html
+#
+# Short-lived access token, longer-lived refresh token. Every successful
+# refresh hands back a new refresh token and blacklists the one just used
+# (token_blacklist app), so a refresh token works exactly once and a
+# replayed or logged-out one is rejected.
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(
+        minutes=env.int('JWT_ACCESS_TOKEN_LIFETIME_MINUTES', default=15),
+    ),
+    'REFRESH_TOKEN_LIFETIME': timedelta(
+        days=env.int('JWT_REFRESH_TOKEN_LIFETIME_DAYS', default=7),
+    ),
+    'ROTATE_REFRESH_TOKENS': env.bool('JWT_ROTATE_REFRESH_TOKENS', default=True),
+    'BLACKLIST_AFTER_ROTATION': env.bool('JWT_BLACKLIST_AFTER_ROTATION', default=True),
+    # Off by default: it adds a users-table write to every login.
+    'UPDATE_LAST_LOGIN': env.bool('JWT_UPDATE_LAST_LOGIN', default=False),
+    # The "Authorization: Bearer <token>" contract the frontend relies on.
+    'AUTH_HEADER_TYPES': tuple(env.list('JWT_AUTH_HEADER_TYPES', default=['Bearer'])),
 }
 
 
@@ -171,9 +383,136 @@ CORS_ALLOWED_ORIGINS = env.list(
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
+#
+# Configured through Django 6.1's MAILERS (the old EMAIL_* *settings* are
+# deprecated), but driven by the familiar EMAIL_* environment variables.
+# Local default: the console backend, which prints mail instead of
+# sending it. Production: set EMAIL_BACKEND to the SMTP backend and
+# supply the EMAIL_* connection variables (see .env.example).
+EMAIL_BACKEND_PATH = env.str(
+    'EMAIL_BACKEND',
+    default='django.core.mail.backends.console.EmailBackend',
+)
+
 MAILERS = {
     'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+        'BACKEND': EMAIL_BACKEND_PATH,
+    },
+}
+
+if EMAIL_BACKEND_PATH == 'django.core.mail.backends.smtp.EmailBackend':
+    MAILERS['default']['OPTIONS'] = {
+        'host': env.str('EMAIL_HOST'),
+        'port': env.int('EMAIL_PORT', default=587),
+        'username': env.str('EMAIL_HOST_USER', default=''),
+        'password': env.str('EMAIL_HOST_PASSWORD', default=''),
+        'use_tls': env.bool('EMAIL_USE_TLS', default=True),
+        'use_ssl': env.bool('EMAIL_USE_SSL', default=False),
+        'timeout': env.int('EMAIL_TIMEOUT', default=10),
+    }
+
+# From-address for ordinary mail, and for error reports sent to ADMINS.
+DEFAULT_FROM_EMAIL = env.str('DEFAULT_FROM_EMAIL', default='webmaster@localhost')
+SERVER_EMAIL = env.str('SERVER_EMAIL', default='root@localhost')
+
+# Comma-separated addresses that receive an email for every logged ERROR
+# (unhandled exceptions / HTTP 500s) while DEBUG is off. Empty = no
+# error emails; errors are still written to the log.
+ADMINS = env.list('ADMINS', default=[])
+
+
+# Logging
+# https://docs.djangoproject.com/en/6.1/topics/logging/
+#
+# Everything goes to the console (stderr), where the process manager /
+# hosting platform collects it. Nothing here logs request bodies or
+# headers: Django's own records carry the status line and, for a 5xx, the
+# traceback — never the Authorization header, cookies or posted data.
+#
+# LOG_LEVEL sets the threshold for the Django and application loggers.
+# INFO by default; under `manage.py test` the default is ERROR, because
+# the suite deliberately provokes hundreds of 4xx responses that would
+# each print a warning.
+LOG_LEVEL = env.str('LOG_LEVEL', default='ERROR' if RUNNING_TESTS else 'INFO').upper()
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '{asctime} {levelname} {name} {message}',
+            'style': '{',
+        },
+    },
+    'filters': {
+        'require_debug_false': {
+            '()': 'django.utils.log.RequireDebugFalse',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+        # Emails ADMINS on ERROR and above, production only. Plain-text
+        # report (include_html=False); does nothing while ADMINS is empty.
+        'mail_admins': {
+            'class': 'django.utils.log.AdminEmailHandler',
+            'level': 'ERROR',
+            'filters': ['require_debug_false'],
+            'include_html': False,
+        },
+    },
+    # Third-party libraries: warnings and errors only.
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        # Framework messages, including django.db.backends and anything
+        # not listed separately below.
+        'django': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        # One record per failed request: 4xx as WARNING, 5xx as ERROR with
+        # the full traceback of the unhandled exception.
+        'django.request': {
+            'handlers': ['console', 'mail_admins'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        # runserver's own request lines (development only).
+        'django.server': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        # Suspicious operations, CSRF failures and similar.
+        'django.security': {
+            'handlers': ['console', 'mail_admins'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        # Requests for a host not in ALLOWED_HOSTS are routine scanner
+        # noise on any public server — logged, but never emailed.
+        'django.security.DisallowedHost': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        # Application code: logging.getLogger(__name__) in either app.
+        'accounts': {
+            'handlers': ['console', 'mail_admins'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'products': {
+            'handlers': ['console', 'mail_admins'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
     },
 }
 
